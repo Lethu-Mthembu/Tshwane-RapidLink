@@ -1,0 +1,25 @@
+{
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "installCommand": "npm install",
+  "rewrites": [
+    { "source": "/session", "destination": "/index.html" },
+    { "source": "/register", "destination": "/index.html" },
+    { "source": "/client", "destination": "/index.html" },
+    { "source": "/client/profile", "destination": "/index.html" },
+    { "source": "/citizen", "destination": "/index.html" },
+    { "source": "/messages", "destination": "/index.html" },
+    { "source": "/responder", "destination": "/index.html" },
+    { "source": "/responder/offers/:offerId", "destination": "/index.html" },
+    { "source": "/supervisor", "destination": "/index.html" },
+    { "source": "/supervisor/analytics", "destination": "/index.html" },
+    { "source": "/supervisor/employees", "destination": "/index.html" },
+    { "source": "/supervisor/attendance", "destination": "/index.html" },
+    { "source": "/dispatcher", "destination": "/index.html" },
+    { "source": "/demo/sms", "destination": "/index.html" },
+    { "source": "/offline", "destination": "/index.html" }
+  ],
+  "headers": [
+    { "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] }
+  ]
+}
