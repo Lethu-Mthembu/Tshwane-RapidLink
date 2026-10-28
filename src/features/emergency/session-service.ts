@@ -288,6 +288,28 @@ const escalateIncident = (state: EmergencyState, incident: Incident, expectedDea
   };
 };
 
+const expandSearchImmediately = (state: EmergencyState, incidentId: string): EmergencyState => {
+  let updated = state;
+  const safetyLimit = Math.max(1, state.stations.length);
+  for (let index = 0; index < safetyLimit; index += 1) {
+    const incident = updated.incidents.find((item) => item.id === incidentId);
+    if (!incident || incident.status !== 'WAITING_FOR_RESPONDER' || incident.assignedEmployeeId) break;
+    if (updated.offers.some((offer) => offer.incidentId === incidentId && offer.status === 'open')) break;
+    if (!orderedStations(updated, incident).some((station) => !incident.notifiedStationIds.includes(station.id))) {
+      updated = { ...updated, incidents: updated.incidents.map((item) => item.id === incidentId ? { ...item, escalationStatus: 'ALL_STATIONS_NOTIFIED', nextEscalationAt: undefined } : item) };
+      break;
+    }
+    const immediateDeadline = now();
+    const prepared = {
+      ...updated,
+      incidents: updated.incidents.map((item) => item.id === incidentId ? { ...item, nextEscalationAt: immediateDeadline } : item),
+    };
+    const preparedIncident = prepared.incidents.find((item) => item.id === incidentId)!;
+    updated = escalateIncident(prepared, preparedIncident, immediateDeadline);
+  }
+  return updated;
+};
+
 export function applyEmergencyAction(current: EmergencyState, event: EmergencyAction): EmergencyState {
   if (current.appliedActionIds.includes(event.id)) return current;
   const remember = (state: EmergencyState): EmergencyState => ({ ...state, revision: current.revision + 1, appliedActionIds: [...current.appliedActionIds.slice(-99), event.id] });
@@ -319,7 +341,10 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
   if (event.type === 'submit-incident') {
     const incident = current.incidents.find((item) => item.id === event.payload.incidentId);
     if (!incident || incident.deliveryState === 'sent') return remember(current);
-    const routed = routeIncident(current, incident);
+    const initiallyRouted = routeIncident(current, incident);
+    const routed = initiallyRouted.offers.some((offer) => offer.incidentId === incident.id && offer.status === 'open')
+      ? initiallyRouted
+      : expandSearchImmediately(initiallyRouted, incident.id);
     const submittedAt = routed.incidents.find((item) => item.id === incident.id)?.submittedAt ?? now();
     return remember({
       ...routed,
@@ -329,7 +354,10 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
   if (event.type === 'update-location') {
     const updated: EmergencyState = { ...current, incidents: current.incidents.map((incident) => incident.id === event.payload.incidentId ? { ...incident, location: event.payload.location, locationNote: event.payload.locationNote ?? incident.locationNote } : incident) };
     const incident = updated.incidents.find((item) => item.id === event.payload.incidentId);
-    const routed = incident?.deliveryState === 'pending' && !incident.stationId ? routeIncident(updated, incident) : updated;
+    const initiallyRouted = incident?.deliveryState === 'pending' && !incident.stationId ? routeIncident(updated, incident) : updated;
+    const routed = incident && !initiallyRouted.offers.some((offer) => offer.incidentId === incident.id && offer.status === 'open')
+      ? expandSearchImmediately(initiallyRouted, incident.id)
+      : initiallyRouted;
     const routedIncident = routed.incidents.find((item) => item.id === event.payload.incidentId);
     return remember(routedIncident ? refreshIncidentMessages(routed, routedIncident) : routed);
   }
@@ -399,13 +427,14 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
     const respondedAt = now();
     const offers = current.offers.map((item) => item.id === offer.id ? { ...item, status: 'declined' as const, respondedAt } : item);
     const incidentOffers = offers.filter((item) => item.incidentId === offer.incidentId);
-    const everyoneDeclined = incidentOffers.length > 0 && incidentOffers.every((item) => item.status === 'declined');
-    return remember({
+    const noOpenOffers = incidentOffers.length > 0 && incidentOffers.every((item) => item.status !== 'open');
+    const updated = {
       ...current,
       offers,
-      incidents: current.incidents.map((item) => item.id === offer.incidentId ? { ...item, deliveryState: everyoneDeclined ? 'everyone_declined' : item.deliveryState, declinedEmployeeIds: [...item.declinedEmployeeIds, offer.employeeId] } : item),
+      incidents: current.incidents.map((item) => item.id === offer.incidentId ? { ...item, deliveryState: noOpenOffers ? 'everyone_declined' : item.deliveryState, declinedEmployeeIds: [...item.declinedEmployeeIds, offer.employeeId] } : item),
       audit: incident ? [...current.audit, { id: generatedId('audit'), type: 'offer-declined', message: `${employee?.employeeNumber ?? 'Responder'} declined ${incident.reference}`, createdAt: respondedAt }] : current.audit,
-    });
+    };
+    return remember(noOpenOffers ? expandSearchImmediately(updated, offer.incidentId) : updated);
   }
   if (event.type === 'accept-offer') {
     const offer = current.offers.find((item) => item.id === event.payload.offerId);
