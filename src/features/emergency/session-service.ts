@@ -16,7 +16,6 @@ import type {
   SessionRecord,
   SyncStatus,
 } from './types.js';
-import { staffAuthorizationHeaders } from '../../lib/staff-auth.js';
 
 export const ACTIVE_SESSION_KEY = 'rapidlink-active-session-v2';
 export const DEVICE_IDENTITY_KEY = 'rapidlink-device-identity-v1';
@@ -34,7 +33,10 @@ const storage = () => (typeof window === 'undefined' ? null : window.localStorag
 const activeCode = () => storage()?.getItem(ACTIVE_SESSION_KEY) ?? null;
 
 const requestHeaders = async (code: string, json = false): Promise<Record<string, string>> => {
-  const headers: Record<string, string> = { ...await staffAuthorizationHeaders() };
+  const staffHeaders = typeof window === 'undefined'
+    ? {}
+    : await import('../../lib/staff-auth.js').then(({ staffAuthorizationHeaders }) => staffAuthorizationHeaders());
+  const headers: Record<string, string> = { ...staffHeaders };
   if (json) headers['content-type'] = 'application/json';
   const clientToken = storage()?.getItem(clientTokenKey(code));
   if (clientToken) headers['x-rapidlink-client-token'] = clientToken;
