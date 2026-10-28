@@ -2,7 +2,7 @@
 
 RapidLink is an installable emergency-response application. A client starts a request, eligible on-duty responders receive an offer, and the first responder to accept owns the incident. A supervisor manages responder records and attendance.
 
-The application is a React single-page PWA built with Vite, TypeScript and Tailwind CSS. Supabase provides PostgreSQL/PostGIS persistence and Vercel Functions provide the server API. The browser keeps an offline queue, but the server is authoritative whenever it is configured.
+The application is a React single-page PWA built with Vite, TypeScript and Tailwind CSS. Supabase provides PostgreSQL/PostGIS persistence. The API can run as Vercel Functions or through the Node web server used by Render. The browser keeps an offline queue, but the server is authoritative whenever it is configured.
 
 ## Run locally
 
@@ -34,7 +34,7 @@ Open [http://localhost:5173](http://localhost:5173) to enter the client flow. Us
 
 Compatibility routes `/citizen`, `/dispatcher`, `/supervisor/employees`, and `/demo/sms` redirect to their current equivalents.
 
-The plain Vite development server uses the local-only fallback because it does not run Vercel Functions. Use `vercel dev` when you need to exercise the Supabase-backed API locally, or test cross-device synchronization on the deployed preview.
+The plain Vite development server uses the local-only fallback because it does not run the API. To run the production-style Node server locally, build first and then run `npm start` with the required environment variables configured.
 
 ## Response flow
 
@@ -58,10 +58,10 @@ Create a Supabase project and apply the migrations in order:
 
 The Phase 1 migration adds authenticated staff membership, one-time invitations, push subscriptions, responder readiness, handover records, notification delivery state and stricter service-role-only database access.
 
-Add these values to `.env.local` and the Vercel project:
+Add these values to `.env.local` and the selected deployment platform:
 
 ```bash
-VITE_APP_URL=https://your-project.vercel.app
+VITE_APP_URL=https://your-deployment.example
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=your-browser-safe-publishable-key
 VITE_VAPID_PUBLIC_KEY=your-vapid-public-key
@@ -71,10 +71,10 @@ CRON_SECRET=a-long-random-server-secret
 RAPIDLINK_BOOTSTRAP_SECRET=a-separate-long-random-secret
 VAPID_PUBLIC_KEY=your-vapid-public-key
 VAPID_PRIVATE_KEY=your-vapid-private-key
-VAPID_SUBJECT=https://your-project.vercel.app
+VAPID_SUBJECT=https://your-deployment.example
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` is still accepted for older projects, but the current Supabase secret key is preferred. Both are server-only and must never use the `VITE_` prefix. All remote writes pass through Vercel Functions. If Supabase is unavailable or not configured, rooms fall back to local-only operation.
+`SUPABASE_SERVICE_ROLE_KEY` is still accepted for older projects, but the current Supabase secret key is preferred. Both are server-only and must never use the `VITE_` prefix. All remote writes pass through the server API. If Supabase is unavailable or not configured, rooms fall back to local-only operation.
 
 Apply migrations with the Supabase CLI after linking the project:
 
@@ -106,7 +106,7 @@ Create the first supervisor at `/staff/bootstrap` using the deployment-only `RAP
 
 Web Push uses the free browser Push API and VAPID keys. Notifications contain only a generic incident alert and a link; operational details are loaded after authenticated access. If a device has no subscription, the in-app inbox remains available. A future SMS provider can consume failed or undelivered outbox records as a fallback, but SMS is not the primary channel.
 
-The scheduled endpoint `/api/cron/escalations` processes persisted escalation deadlines. Vercel invokes it every minute as a safety worker. For the required 30-second cadence, configure Supabase Cron or another trusted scheduler to call it every 30 seconds with `Authorization: Bearer <CRON_SECRET>`. Browser recovery remains a secondary safeguard, not the only scheduler.
+The scheduled endpoint `/api/cron/escalations` processes persisted escalation deadlines. The Render Node service also performs a non-overlapping sweep every 30 seconds while its process is running. A free Render service sleeps after inactivity, so production still requires an always-on worker or another trusted scheduler. Browser recovery remains a secondary safeguard, not the only scheduler.
 
 ## PWA and offline behavior
 
@@ -120,15 +120,28 @@ Cross-device synchronization requires connectivity. Offline demonstrations work 
 - Staff access is authenticated, but the compatibility session JSON remains a broad projection. A later backend hardening phase should replace projection mutation with narrow database commands and per-entity authorization.
 - Cancellation PIN verification and throttling run on the server, but this is still not a complete account-recovery system. No fake frontend-only PIN recovery is provided.
 - Browser push delivery is best-effort and platform-dependent. A production service needs monitored fallback channels and delivery escalation; real SMS incurs provider cost.
-- Vercel Hobby cron runs at one-minute granularity. The browser deadline recovery improves responsiveness, but a production 30-second SLA needs a trusted worker or scheduler.
+- The free Render web service sleeps after inactivity and can take about a minute to restart. Its in-process 30-second sweep is therefore not a production scheduling guarantee. A production 30-second SLA needs an always-on worker or scheduler.
 - Handover and supervisor override release responders atomically in the current compatibility transaction. Production should add receiving-facility identity, immutable audit retention and operational review.
 - The browser fallback is not authoritative across devices. Cross-device operation requires the configured API and database.
 
-## Deployment
+## Render deployment
+
+Deploy the repository as one Node Web Service. Do not use a Static Site: the operational `/api` routes require server-side execution.
+
+- Build command: `npm ci && npm run build`
+- Start command: `npm start`
+- Health check: `/healthz`
+- Runtime: Node
+- Branch: `main`
+
+The server binds to Render's `PORT`, serves `dist`, preserves SPA routing, exposes the existing API routes and runs the escalation sweep while the instance is awake. Configure all environment variables listed above, set `VITE_APP_URL` and `VAPID_SUBJECT` to the final Render HTTPS URL, and keep all secret values out of Git.
+
+## Vercel deployment
 
 Import the repository into Vercel, select the Vite framework preset, add the environment variables above, and deploy. No root-directory override or separate backend deployment is required; Vercel deploys the functions in `/api` with the SPA.
 
 ```bash
 npm run typecheck
 npm run build
+npm start
 ```

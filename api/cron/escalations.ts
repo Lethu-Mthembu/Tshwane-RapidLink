@@ -42,6 +42,19 @@ async function processSession(initial: SessionRecord) {
   return { processed, push };
 }
 
+export async function runEscalationSweep() {
+  if (!supabaseConfigured) throw new Error('Operational storage is not configured.');
+  const [dueSessions, notificationSessions] = await Promise.all([listDueSessions(), listNotificationSessions()]);
+  const sessions = [...new Map([...dueSessions, ...notificationSessions].map((session) => [session.id, session])).values()];
+  const results = await Promise.all(sessions.map(processSession));
+  return {
+    sessionsChecked: sessions.length,
+    escalationsProcessed: results.reduce((sum, value) => sum + value.processed, 0),
+    notificationsSubmitted: results.reduce((sum, value) => sum + value.push.submitted, 0),
+    notificationFailures: results.reduce((sum, value) => sum + value.push.failed + value.push.unregistered, 0),
+  };
+}
+
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   if (request.method !== 'GET' && request.method !== 'POST') return methodNotAllowed(response, 'GET, POST');
   if (!supabaseConfigured) return response.status(503).json({ message: 'Operational storage is not configured.' });
@@ -51,15 +64,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   if (bearerToken(request) !== `Bearer ${secret}`) return response.status(401).json({ message: 'Unauthorized.' });
 
   try {
-    const [dueSessions, notificationSessions] = await Promise.all([listDueSessions(), listNotificationSessions()]);
-    const sessions = [...new Map([...dueSessions, ...notificationSessions].map((session) => [session.id, session])).values()];
-    const results = await Promise.all(sessions.map(processSession));
-    return response.status(200).json({
-      sessionsChecked: sessions.length,
-      escalationsProcessed: results.reduce((sum, value) => sum + value.processed, 0),
-      notificationsSubmitted: results.reduce((sum, value) => sum + value.push.submitted, 0),
-      notificationFailures: results.reduce((sum, value) => sum + value.push.failed + value.push.unregistered, 0),
-    });
+    return response.status(200).json(await runEscalationSweep());
   } catch {
     return response.status(502).json({ message: 'Escalation processing failed.' });
   }
