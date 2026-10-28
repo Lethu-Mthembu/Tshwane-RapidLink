@@ -7,6 +7,7 @@ export type IncidentProgress =
   | 'accepted'
   | 'en_route'
   | 'arrived'
+  | 'handover_in_progress'
   | 'cancellation_requested'
   | 'cancelled'
   | 'completed';
@@ -17,6 +18,7 @@ export type IncidentStatus =
   | 'ACCEPTED'
   | 'EN_ROUTE'
   | 'ARRIVED'
+  | 'HANDOVER_IN_PROGRESS'
   | 'CANCELLATION_REQUESTED'
   | 'CANCELLED'
   | 'COMPLETED'
@@ -25,9 +27,12 @@ export type IncidentStatus =
 export type RegistrationStatus = 'NOT_REGISTERED' | 'SAVING' | 'REGISTERED' | 'SAVE_FAILED';
 export type EscalationStatus = 'INITIAL_STATION' | 'SEARCH_EXPANDED' | 'ALL_STATIONS_NOTIFIED' | 'STOPPED';
 
-export type DeliveryState = 'pending' | 'sent' | 'failed' | 'no_station' | 'no_responders' | 'everyone_declined';
+export type DeliveryState = 'pending' | 'queued' | 'sent' | 'delivered' | 'failed' | 'no_station' | 'no_responders' | 'everyone_declined';
 export type AttendanceChoice = 'present' | 'absent' | 'leave';
 export type OfferStatus = 'open' | 'declined' | 'accepted' | 'closed';
+export type StaffRole = 'responder' | 'supervisor';
+export type ResponderAvailability = 'available' | 'temporarily_unavailable';
+export type HandoverType = 'hospital' | 'police_station' | 'emergency_service' | 'authorized_person';
 
 export interface CapturedLocation {
   latitude: number;
@@ -94,6 +99,13 @@ export interface Incident {
   nextEscalationAt?: string;
   assignedEmployeeId?: string;
   acceptedAt?: string;
+  firstOfferCreatedAt?: string;
+  firstNotificationQueuedAt?: string;
+  firstNotificationDeliveredAt?: string;
+  enRouteAt?: string;
+  arrivedAt?: string;
+  cancelledAt?: string;
+  lastUpdatedAt?: string;
   information: IncidentInformation[];
   informationError?: string;
   declinedEmployeeIds: string[];
@@ -103,6 +115,17 @@ export interface Incident {
   completionRequestedAt?: string;
   completionRequestStatus?: 'pending' | 'declined' | 'confirmed';
   completedAt?: string;
+  completionSource?: 'client_confirmation' | 'verified_handover' | 'supervisor_override';
+  handover?: {
+    type: HandoverType;
+    destinationName: string;
+    receivingPersonName: string;
+    receivingPersonRole: string;
+    verificationReference: string;
+    notes?: string;
+    startedAt: string;
+    completedAt?: string;
+  };
 }
 
 export interface Station {
@@ -123,6 +146,12 @@ export interface Employee {
   service: ServiceType;
   stationId: string;
   active: boolean;
+  workEmail?: string;
+  accessEnabled?: boolean;
+  availability: ResponderAvailability;
+  availabilityReason?: string;
+  availabilityUpdatedAt?: string;
+  lastHeartbeatAt?: string;
 }
 
 export interface AttendanceEntry {
@@ -153,12 +182,17 @@ export interface ResponderMessage {
   employeeId: string;
   createdAt: string;
   readAt?: string;
-  provider?: 'simulated';
-  deliveryStatus?: 'simulated' | 'queued' | 'sent' | 'failed';
+  channel?: 'in_app' | 'sms';
+  provider?: 'in_app' | 'web_push' | 'sms';
+  deliveryStatus?: 'queued' | 'submitted' | 'delivered' | 'read' | 'failed' | 'no_subscription';
   recipientPhone?: string;
   body?: string;
   responsePath?: string;
   sentAt?: string;
+  submittedAt?: string;
+  deliveredAt?: string;
+  failedAt?: string;
+  attempts?: number;
 }
 
 export interface AuditEvent {
@@ -170,6 +204,7 @@ export interface AuditEvent {
 
 export interface EmergencyState {
   version: 3;
+  accessScope?: 'client' | 'staff';
   revision: number;
   appliedActionIds: string[];
   stations: Station[];
@@ -193,10 +228,15 @@ export type EmergencyAction =
   | { id: string; type: 'add-information'; payload: { incidentId: string; happened: string; landmark: string; attachments: IncidentAttachment[] } }
   | { id: string; type: 'save-attendance'; payload: { employeeId: string; date: string; shiftStart: string; shiftEnd: string; choice: AttendanceChoice } }
   | { id: string; type: 'end-shift'; payload: { employeeId: string } }
+  | { id: string; type: 'set-responder-availability'; payload: { employeeId: string; availability: ResponderAvailability; reason?: string } }
+  | { id: string; type: 'responder-heartbeat'; payload: { employeeId: string } }
   | { id: string; type: 'add-employee'; payload: { employee: Omit<Employee, 'id'> } }
   | { id: string; type: 'update-employee'; payload: { employee: Employee } }
   | { id: string; type: 'decline-offer'; payload: { offerId: string } }
   | { id: string; type: 'accept-offer'; payload: { offerId: string } }
+  | { id: string; type: 'mark-notification-delivered'; payload: { messageId: string } }
+  | { id: string; type: 'mark-notification-read'; payload: { messageId: string } }
+  | { id: string; type: 'record-notification-result'; payload: { messageId: string; status: 'submitted' | 'failed' | 'no_subscription' } }
   | { id: string; type: 'update-progress'; payload: { incidentId: string; employeeId: string; progress: IncidentProgress } }
   | { id: string; type: 'save-profile'; payload: { profile: ClientProfile; security: CancellationPinRecord } }
   | { id: string; type: 'update-profile'; payload: { profile: ClientProfile } }
@@ -208,7 +248,19 @@ export type EmergencyAction =
   | { id: string; type: 'escalate-incident'; payload: { incidentId: string; expectedDeadline: string } }
   | { id: string; type: 'request-completion'; payload: { incidentId: string; employeeId: string } }
   | { id: string; type: 'confirm-help-received'; payload: { incidentId: string; received: boolean } }
+  | { id: string; type: 'complete-handover'; payload: { incidentId: string; employeeId: string; handover: Omit<NonNullable<Incident['handover']>, 'startedAt' | 'completedAt'> } }
+  | { id: string; type: 'supervisor-close-incident'; payload: { incidentId: string; reason: string } }
   | { id: string; type: 'reset-session'; payload: Record<string, never> };
+
+export interface StaffIdentity {
+  userId: string;
+  sessionId: string;
+  sessionCode: string;
+  role: StaffRole;
+  stationId: string;
+  employeeId?: string;
+  email: string;
+}
 
 export interface SessionRecord {
   id: string;

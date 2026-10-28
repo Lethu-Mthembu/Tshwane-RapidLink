@@ -3,12 +3,12 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
+import { useStaffAuth } from '@/features/auth/staff-auth-context';
 import { serviceLabel } from '@/features/emergency/config';
 import { useEmergency } from '@/features/emergency/emergency-context';
-import { employeeBusy, employeeDuty, sessionService } from '@/features/emergency/session-service';
+import { employeeBusy, employeeDuty, employeeReachable, sessionService } from '@/features/emergency/session-service';
 import type { AttendanceChoice } from '@/features/emergency/types';
 
-const STATION_ID = 'station-garankuwa';
 const inputClass = 'h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-[#003172] focus:ring-4 focus:ring-blue-100';
 
 const localDateKey = (date = new Date()) => {
@@ -27,7 +27,9 @@ const localIso = (date: string, time: string) => new Date(`${date}T${time}:00`).
 
 export default function AttendancePage() {
   const { state, online, refresh } = useEmergency();
-  const station = state.stations.find((item) => item.id === STATION_ID);
+  const { identity } = useStaffAuth();
+  const stationId = identity?.stationId ?? '';
+  const station = state.stations.find((item) => item.id === stationId);
   const today = localDateKey();
   const [notice, setNotice] = useState('');
   const [defaults] = useState(() => {
@@ -36,8 +38,8 @@ export default function AttendancePage() {
     return { start: timeValue(start.toISOString()), end: timeValue(end.toISOString()) };
   });
   const employees = useMemo(
-    () => state.employees.filter((item) => item.stationId === STATION_ID && item.active),
-    [state.employees],
+    () => state.employees.filter((item) => item.stationId === stationId && item.active),
+    [state.employees, stationId],
   );
   const todayByEmployee = useMemo(
     () => Object.fromEntries(employees.map((employee) => [
@@ -109,8 +111,9 @@ export default function AttendancePage() {
               const value = row(employee.id);
               const onDuty = employeeDuty(state, employee.id);
               const busy = employeeBusy(state, employee.id);
-              const dispatchLabel = !onDuty ? 'Off duty' : busy ? 'Responding' : 'Available';
-              const dispatchClasses = !onDuty ? 'bg-slate-100 text-slate-700' : busy ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900';
+              const reachable = employeeReachable(employee);
+              const dispatchLabel = !onDuty ? 'Off duty' : !reachable ? 'Unavailable' : busy ? 'Responding' : 'Available';
+              const dispatchClasses = !onDuty || !reachable ? 'bg-slate-100 text-slate-700' : busy ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900';
               return (
                 <article key={employee.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_8px_24px_rgba(15,23,42,0.06)]">
                   <div className="flex items-start gap-3">
@@ -135,8 +138,9 @@ export default function AttendancePage() {
                   const value = row(employee.id);
                   const onDuty = employeeDuty(state, employee.id);
                   const busy = employeeBusy(state, employee.id);
-                  const dispatchLabel = !onDuty ? 'Off duty' : busy ? 'Responding' : 'Available';
-                  const dispatchClasses = !onDuty ? 'bg-slate-100 text-slate-700' : busy ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900';
+                  const reachable = employeeReachable(employee);
+                  const dispatchLabel = !onDuty ? 'Off duty' : !reachable ? 'Unavailable' : busy ? 'Responding' : 'Available';
+                  const dispatchClasses = !onDuty || !reachable ? 'bg-slate-100 text-slate-700' : busy ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900';
                   return (
                     <tr key={employee.id} className="align-middle">
                       <td className="px-4 py-4"><p className="font-extrabold text-slate-950">{employee.name} {employee.surname}</p><p className="mt-0.5 text-xs font-semibold text-slate-500">{employee.employeeNumber}</p></td>

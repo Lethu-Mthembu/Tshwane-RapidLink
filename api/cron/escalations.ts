@@ -1,7 +1,8 @@
 import { applyEmergencyAction, normalizeEmergencyState } from '../../src/features/emergency/session-service.js';
 import type { EmergencyAction, SessionRecord } from '../../src/features/emergency/types.js';
-import { commitSessionAction, listDueSessions, supabaseConfigured } from '../../src/lib/supabase-server.js';
+import { commitSessionAction, listDueSessions, listNotificationSessions, supabaseConfigured } from '../../src/lib/supabase-server.js';
 import { methodNotAllowed, type ApiRequest, type ApiResponse } from '../../src/lib/vercel-api.js';
+import { dispatchQueuedPushNotifications } from '../../src/lib/web-push-server.js';
 
 function bearerToken(request: ApiRequest) {
   const value = request.headers.authorization;
@@ -32,7 +33,13 @@ async function processSession(initial: SessionRecord) {
     processed += 1;
   }
 
-  return processed;
+  const push = await dispatchQueuedPushNotifications(record.id, record.code).catch(() => ({ submitted: 0, failed: 0, unregistered: 0, results: [] as Array<{ messageId: string; status: 'submitted' | 'failed' | 'no_subscription' }> }));
+  for (const result of push.results) {
+    const event: EmergencyAction = { id: crypto.randomUUID(), type: 'record-notification-result', payload: result };
+    const updated = await commitSessionAction(record, applyEmergencyAction(normalizeEmergencyState(record.state), event), event);
+    if (updated) record = updated;
+  }
+  return { processed, push };
 }
 
 export default async function handler(request: ApiRequest, response: ApiResponse) {
@@ -44,9 +51,15 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   if (bearerToken(request) !== `Bearer ${secret}`) return response.status(401).json({ message: 'Unauthorized.' });
 
   try {
-    const sessions = await listDueSessions();
+    const [dueSessions, notificationSessions] = await Promise.all([listDueSessions(), listNotificationSessions()]);
+    const sessions = [...new Map([...dueSessions, ...notificationSessions].map((session) => [session.id, session])).values()];
     const results = await Promise.all(sessions.map(processSession));
-    return response.status(200).json({ sessionsChecked: sessions.length, escalationsProcessed: results.reduce((sum, value) => sum + value, 0) });
+    return response.status(200).json({
+      sessionsChecked: sessions.length,
+      escalationsProcessed: results.reduce((sum, value) => sum + value.processed, 0),
+      notificationsSubmitted: results.reduce((sum, value) => sum + value.push.submitted, 0),
+      notificationFailures: results.reduce((sum, value) => sum + value.push.failed + value.push.unregistered, 0),
+    });
   } catch {
     return response.status(502).json({ message: 'Escalation processing failed.' });
   }

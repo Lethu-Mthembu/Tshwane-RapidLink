@@ -1,13 +1,16 @@
-import { Clock3, ExternalLink, Inbox, MapPin, MessageSquareText, Radio, UsersRound } from 'lucide-react';
-import { useMemo } from 'react';
+import { Bell, Clock3, ExternalLink, Inbox, MapPin, MessageSquareText, Radio, UsersRound } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
+import { useStaffAuth } from '@/features/auth/staff-auth-context';
 import { serviceLabel } from '@/features/emergency/config';
 import { useEmergency } from '@/features/emergency/emergency-context';
+import { sessionService } from '@/features/emergency/session-service';
+import { enablePushNotifications, pushNotificationsConfigured } from '@/lib/push-notifications';
 import type { Employee, Incident, IncidentOffer, ResponderMessage, Station } from '@/features/emergency/types';
 
-interface SmsItem {
+interface AlertItem {
   message: ResponderMessage;
   offer: IncidentOffer;
   incident: Incident;
@@ -15,12 +18,12 @@ interface SmsItem {
   station: Station | undefined;
 }
 
-interface SmsGroup {
+interface AlertGroup {
   incident: Incident;
-  messages: SmsItem[];
+  messages: AlertItem[];
 }
 
-function offerLabel(item: SmsItem) {
+function offerLabel(item: AlertItem) {
   if (item.incident.status === 'COMPLETED') return 'Completed';
   if (item.incident.status === 'CANCELLED') return 'Cancelled';
   if (item.offer.status === 'accepted') return 'Accepted';
@@ -30,7 +33,7 @@ function offerLabel(item: SmsItem) {
   return 'Closed';
 }
 
-function offerClasses(item: SmsItem) {
+function offerClasses(item: AlertItem) {
   const label = offerLabel(item);
   if (label === 'Accepted') return 'bg-emerald-100 text-emerald-900';
   if (label === 'Awaiting response') return 'bg-red-100 text-red-800';
@@ -52,16 +55,45 @@ function incidentPriority(incident: Incident) {
   return 2;
 }
 
-function recipientPriority(item: SmsItem) {
+function recipientPriority(item: AlertItem) {
   if (item.offer.status === 'open' && !item.incident.assignedEmployeeId) return 0;
   if (item.offer.status === 'accepted' || item.incident.assignedEmployeeId === item.employee.id) return 1;
   return 2;
 }
 
 export default function ResponderMessagesPage() {
-  const { state, online, sessionCode } = useEmergency();
+  const { state, online, sessionCode, refresh } = useEmergency();
+  const { identity } = useStaffAuth();
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => typeof Notification === 'undefined' ? 'denied' : Notification.permission);
+  const [notificationMessage, setNotificationMessage] = useState('');
+  const currentEmployee = state.employees.find((employee) => employee.id === identity?.employeeId);
 
-  const items = useMemo<SmsItem[]>(() => state.messages
+  useEffect(() => {
+    if (!identity?.employeeId || identity.role !== 'responder') return;
+    const heartbeat = () => { sessionService.responderHeartbeat(identity.employeeId!); refresh(); };
+    heartbeat();
+    const timer = window.setInterval(heartbeat, 60_000);
+    return () => window.clearInterval(timer);
+  }, [identity?.employeeId, identity?.role, refresh]);
+
+  useEffect(() => {
+    if (!identity?.employeeId) return;
+    const queued = state.messages.filter((message) => message.employeeId === identity.employeeId && message.deliveryStatus === 'queued');
+    for (const message of queued) {
+      sessionService.markNotificationDelivered(message.id);
+      if (notificationPermission === 'granted' && document.visibilityState !== 'visible') {
+        const incident = state.incidents.find((item) => item.id === message.incidentId);
+        void navigator.serviceWorker?.ready.then((registration) => registration.showNotification('RapidLink emergency request', {
+          body: incident ? `${serviceLabel(incident.service)} assistance requested. ${incident.reference}` : 'A new emergency request is available.',
+          tag: message.offerId,
+          data: { url: `/responder/offers/${message.offerId}${sessionCode ? `?session=${encodeURIComponent(sessionCode)}` : ''}` },
+        }));
+      }
+    }
+    if (queued.length) refresh();
+  }, [identity?.employeeId, notificationPermission, refresh, sessionCode, state.incidents, state.messages]);
+
+  const items = useMemo<AlertItem[]>(() => state.messages
     .map((message) => {
       const offer = state.offers.find((item) => item.id === message.offerId);
       const incident = state.incidents.find((item) => item.id === message.incidentId);
@@ -73,13 +105,13 @@ export default function ResponderMessagesPage() {
         incident,
         employee,
         station: state.stations.find((station) => station.id === employee.stationId),
-      } satisfies SmsItem;
+      } satisfies AlertItem;
     })
-    .filter((item): item is SmsItem => item !== null)
+    .filter((item): item is AlertItem => item !== null)
     .sort((a, b) => Date.parse(b.message.createdAt) - Date.parse(a.message.createdAt)), [state.employees, state.incidents, state.messages, state.offers, state.stations]);
 
-  const groups = useMemo<SmsGroup[]>(() => {
-    const grouped = new Map<string, SmsGroup>();
+  const groups = useMemo<AlertGroup[]>(() => {
+    const grouped = new Map<string, AlertGroup>();
     for (const item of items) {
       const group = grouped.get(item.incident.id);
       if (group) group.messages.push(item);
@@ -101,7 +133,7 @@ export default function ResponderMessagesPage() {
         <header className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_14px_38px_rgba(15,23,42,0.08)]">
           <div className="flex items-start gap-3 p-5 sm:p-6">
             <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-blue-50 text-[#003172]"><MessageSquareText className="h-5 w-5" /></span>
-            <div className="min-w-0"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-slate-400">Responder alerts</p><h1 className="mt-0.5 text-2xl font-black tracking-tight text-[#003172] sm:text-3xl">SMS alerts</h1><p className="mt-1 text-sm font-semibold text-slate-500">The same alert is sent to every eligible nearby responder.</p></div>
+            <div className="min-w-0"><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-slate-400">Responder alerts</p><h1 className="mt-0.5 text-2xl font-black tracking-tight text-[#003172] sm:text-3xl">Emergency requests</h1><p className="mt-1 text-sm font-semibold text-slate-500">In-app alerts are sent to eligible responders at the notified station.</p></div>
           </div>
           <div className="grid grid-cols-3 divide-x divide-slate-200 border-t border-slate-100 bg-slate-50/80 py-3 text-center">
             <div className="px-2"><p className="text-xl font-black text-[#003172]">{items.length}</p><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Messages</p></div>
@@ -111,6 +143,7 @@ export default function ResponderMessagesPage() {
         </header>
 
         <div className="mt-6 space-y-7">
+          {identity?.role === 'responder' && currentEmployee && <section className="bg-white p-4 shadow-[0_8px_24px_rgba(15,23,42,0.06)]" aria-labelledby="readiness-heading"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 id="readiness-heading" className="font-extrabold text-[#003172]">Response readiness</h2><p className="mt-1 text-sm text-slate-600">Status: <strong>{currentEmployee.availability === 'available' ? 'Available' : 'Temporarily unavailable'}</strong></p></div><div className="flex gap-2"><Button variant={currentEmployee.availability === 'available' ? 'primary' : 'outline'} onClick={() => { sessionService.setResponderAvailability(currentEmployee.id, 'available'); refresh(); }}>Available</Button><Button variant={currentEmployee.availability === 'temporarily_unavailable' ? 'primary' : 'outline'} onClick={() => { sessionService.setResponderAvailability(currentEmployee.id, 'temporarily_unavailable', 'Set by responder'); refresh(); }}>Unavailable</Button></div></div>{(notificationPermission !== 'granted' || pushNotificationsConfigured) && <Button variant="outline" className="mt-4 min-h-11 w-full" onClick={() => { if (!sessionCode) return; setNotificationMessage(''); void enablePushNotifications(sessionCode).then(() => { setNotificationPermission('granted'); setNotificationMessage('Device notifications enabled.'); }).catch((error: unknown) => setNotificationMessage(error instanceof Error ? error.message : 'Device notifications could not be enabled.')); }}><Bell className="h-4 w-4" /> Enable device notifications</Button>}{notificationMessage && <p className="mt-3 text-sm font-semibold text-[#003172]" role="status">{notificationMessage}</p>}</section>}
           {groups.map((group) => (
             <section key={group.incident.id} aria-labelledby={`incident-${group.incident.id}`}>
               <div className="flex items-end justify-between gap-3">
@@ -142,7 +175,7 @@ export default function ResponderMessagesPage() {
             </section>
           ))}
 
-          {!groups.length && <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-5 py-12 text-center"><span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-slate-100 text-slate-500"><Inbox className="h-6 w-6" /></span><h2 className="mt-3 font-extrabold text-slate-950">No SMS alerts</h2><p className="mt-1 text-sm text-slate-500">New emergency alerts will appear here.</p></div>}
+          {!groups.length && <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-5 py-12 text-center"><span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-slate-100 text-slate-500"><Inbox className="h-6 w-6" /></span><h2 className="mt-3 font-extrabold text-slate-950">No emergency requests</h2><p className="mt-1 text-sm text-slate-500">New in-app alerts will appear here.</p></div>}
         </div>
 
         {items.length > 0 && <p className="mt-7 flex items-center justify-center gap-2 pb-4 text-center text-xs font-semibold text-slate-500"><UsersRound className="h-4 w-4" /> The first responder to accept is assigned. All other response links then close.</p>}

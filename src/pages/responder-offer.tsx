@@ -1,12 +1,13 @@
-import { AlertTriangle, ArrowLeft, CheckCircle2, Clock3, MapPin, Navigation, Phone, ShieldAlert, UserRound, XCircle } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Building2, CheckCircle2, Clock3, MapPin, Navigation, Phone, ShieldAlert, UserRound, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
+import { AccessibleModal } from '@/components/accessible-modal';
 import { serviceLabel } from '@/features/emergency/config';
 import { useEmergency } from '@/features/emergency/emergency-context';
 import { employeeBusy, employeeDuty, joinSession, normalizeRoomCode, sessionService } from '@/features/emergency/session-service';
-import type { AcceptResult, IncidentProgress } from '@/features/emergency/types';
+import type { AcceptResult, HandoverType, IncidentProgress } from '@/features/emergency/types';
 
 const failureCopy: Record<NonNullable<AcceptResult['reason']>, string> = {
   invalid: 'This response link is invalid or expired.',
@@ -23,6 +24,8 @@ export default function ResponderOfferPage() {
   const [resultMessage, setResultMessage] = useState('');
   const [accepting, setAccepting] = useState(false);
   const [joiningLinkedSession, setJoiningLinkedSession] = useState(false);
+  const [handoverOpen, setHandoverOpen] = useState(false);
+  const [handover, setHandover] = useState({ type: 'hospital' as HandoverType, destinationName: '', receivingPersonName: '', receivingPersonRole: '', verificationReference: '', notes: '' });
   const linkedSession = normalizeRoomCode(searchParams.get('session') ?? '');
   const offer = state.offers.find((item) => item.id === params.offerId);
   const incident = state.incidents.find((item) => item.id === offer?.incidentId);
@@ -48,6 +51,13 @@ export default function ResponderOfferPage() {
   useEffect(() => {
     if (employee) window.localStorage.setItem(`rapidlink-responder-${sessionCode ?? 'local'}`, employee.id);
   }, [employee, sessionCode]);
+
+  useEffect(() => {
+    const message = state.messages.find((item) => item.offerId === offer?.id && item.employeeId === employee?.id);
+    if (!message || message.deliveryStatus === 'read') return;
+    sessionService.markNotificationRead(message.id);
+    refresh();
+  }, [employee?.id, offer?.id, refresh, state.messages]);
 
   const accept = async () => {
     if (!offer) return;
@@ -83,6 +93,14 @@ export default function ResponderOfferPage() {
     sessionService.requestCompletion(incident.id, employee.id);
     refresh();
     setResultMessage('Closure requested. The incident remains active until the client confirms receiving help.');
+  };
+
+  const completeHandover = () => {
+    if (!incident || !employee || !handover.destinationName.trim() || !handover.receivingPersonName.trim() || !handover.receivingPersonRole.trim() || !handover.verificationReference.trim()) return;
+    sessionService.completeHandover(incident.id, employee.id, handover);
+    refresh();
+    setHandoverOpen(false);
+    setResultMessage('Handover recorded. The incident is closed and you are available for another request.');
   };
 
   if (!ready || joiningLinkedSession) {
@@ -146,7 +164,7 @@ export default function ResponderOfferPage() {
             <div className="mt-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_24px_rgba(15,23,42,0.06)]"><h3 className="text-lg font-extrabold text-[#003172]">Additional information</h3>{details.length ? <div className="mt-3 space-y-4">{details.map((info) => <div key={info.id} className="rounded-xl bg-slate-50 p-4"><p className="font-semibold text-slate-900">{info.happened || 'No description supplied.'}</p>{info.landmark && <p className="mt-1 text-sm text-slate-700">Access: {info.landmark}</p>}<div className="mt-3 grid gap-3 sm:grid-cols-2">{info.attachments.map((attachment) => attachment.kind === 'photo' ? <img key={attachment.id} src={attachment.dataUrl} alt="Client attachment" width={600} height={400} className="max-h-56 w-full rounded-lg object-cover" /> : <audio key={attachment.id} controls src={attachment.dataUrl} className="w-full" />)}</div></div>)}</div> : <p className="mt-2 text-sm text-slate-500">No additional information.</p>}</div>
 
             <div className="mt-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_24px_rgba(15,23,42,0.06)]"><h3 className="text-lg font-extrabold text-[#003172]">Progress</h3><div className="mt-3 grid grid-cols-3 gap-2">{(['accepted', 'en_route', 'arrived'] as IncidentProgress[]).map((progress) => <Button key={progress} variant={incident.progress === progress ? 'primary' : 'outline'} onClick={() => updateProgress(progress)} disabled={['CANCELLATION_REQUESTED', 'CANCELLED', 'COMPLETED'].includes(incident.status)}>{progress === 'en_route' ? 'En route' : progress.charAt(0).toUpperCase() + progress.slice(1)}</Button>)}</div>
-              <div className="mt-4 rounded-2xl bg-slate-50 p-4"><p className="font-bold text-slate-900">Close after help is received</p><p className="mt-1 text-sm text-slate-600">After arriving, ask the client to confirm the assistance.</p>{incident.completionRequestStatus === 'pending' && <p className="mt-3 font-bold text-[#003172]" role="status">Waiting for client confirmation.</p>}{incident.completionRequestStatus === 'declined' && <p className="mt-3 font-bold text-amber-900" role="status">The client still needs help.</p>}{incident.completionRequestStatus === 'confirmed' && <p className="mt-3 font-bold text-emerald-800" role="status">Help confirmed. Incident closed.</p>}<Button className="mt-4 min-h-12 w-full" onClick={requestClosure} disabled={incident.status !== 'ARRIVED' || incident.completionRequestStatus === 'pending'}>{incident.completionRequestStatus === 'declined' ? 'Request confirmation again' : 'Request closure'}</Button></div>
+              <div className="mt-4 rounded-2xl bg-slate-50 p-4"><p className="font-bold text-slate-900">Close after help is received</p><p className="mt-1 text-sm text-slate-600">Ask the client to confirm, or record a verified handover if the client cannot use their phone.</p>{incident.completionRequestStatus === 'pending' && <p className="mt-3 font-bold text-[#003172]" role="status">Waiting for client confirmation.</p>}{incident.completionRequestStatus === 'declined' && <p className="mt-3 font-bold text-amber-900" role="status">The client still needs help.</p>}{incident.completionRequestStatus === 'confirmed' && <p className="mt-3 font-bold text-emerald-800" role="status">Help confirmed. Incident closed.</p>}<div className="mt-4 grid gap-2 sm:grid-cols-2"><Button className="min-h-12" onClick={requestClosure} disabled={incident.status !== 'ARRIVED' || incident.completionRequestStatus === 'pending'}>{incident.completionRequestStatus === 'declined' ? 'Request confirmation again' : 'Request client confirmation'}</Button><Button variant="outline" className="min-h-12" onClick={() => setHandoverOpen(true)} disabled={incident.status !== 'ARRIVED'}><Building2 className="h-4 w-4" /> Record handover</Button></div></div>
             </div>
             {resultMessage && <div className="mt-4 border-l-4 border-[#003172] bg-blue-50 p-4 font-bold text-[#003172]" role="status">{resultMessage}</div>}
           </section>
@@ -154,6 +172,17 @@ export default function ResponderOfferPage() {
 
         {offer.status === 'declined' && !assignedElsewhere && <div className="mt-6 flex gap-3 rounded-2xl bg-slate-200 p-4 text-slate-900"><XCircle className="h-5 w-5 shrink-0" /><p className="font-bold">You declined this request.</p></div>}
       </div>
+      <AccessibleModal open={handoverOpen} title="Record verified handover" description="Use this only when responsibility has been transferred to an identified person or facility." onClose={() => setHandoverOpen(false)}>
+        <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); completeHandover(); }}>
+          <label className="text-sm font-bold text-slate-700">Handover type<select value={handover.type} onChange={(event) => setHandover({ ...handover, type: event.target.value as HandoverType })} className="mt-2 h-12 w-full border border-slate-300 px-3 text-base"><option value="hospital">Hospital or clinic</option><option value="police_station">Police station</option><option value="emergency_service">Another emergency service</option><option value="authorized_person">Authorized person</option></select></label>
+          <label className="text-sm font-bold text-slate-700">Destination or facility<input value={handover.destinationName} onChange={(event) => setHandover({ ...handover, destinationName: event.target.value })} className="mt-2 h-12 w-full border border-slate-300 px-3 text-base" required /></label>
+          <label className="text-sm font-bold text-slate-700">Receiving person<input value={handover.receivingPersonName} onChange={(event) => setHandover({ ...handover, receivingPersonName: event.target.value })} className="mt-2 h-12 w-full border border-slate-300 px-3 text-base" required /></label>
+          <label className="text-sm font-bold text-slate-700">Receiving person role<input value={handover.receivingPersonRole} onChange={(event) => setHandover({ ...handover, receivingPersonRole: event.target.value })} placeholder="Nurse, officer, paramedic" className="mt-2 h-12 w-full border border-slate-300 px-3 text-base" required /></label>
+          <label className="text-sm font-bold text-slate-700">Handover reference<input value={handover.verificationReference} onChange={(event) => setHandover({ ...handover, verificationReference: event.target.value })} placeholder="Facility or case reference" className="mt-2 h-12 w-full border border-slate-300 px-3 text-base" required /></label>
+          <label className="text-sm font-bold text-slate-700">Notes<textarea value={handover.notes} onChange={(event) => setHandover({ ...handover, notes: event.target.value })} rows={3} className="mt-2 w-full border border-slate-300 p-3 text-base" /></label>
+          <div className="grid gap-2 sm:grid-cols-2"><Button type="submit" className="min-h-12">Confirm handover</Button><Button type="button" variant="outline" className="min-h-12" onClick={() => setHandoverOpen(false)}>Cancel</Button></div>
+        </form>
+      </AccessibleModal>
     </main>
   );
 }

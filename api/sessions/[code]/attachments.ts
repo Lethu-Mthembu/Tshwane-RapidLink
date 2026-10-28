@@ -1,5 +1,6 @@
 import { normalizeRoomCode } from '../../../src/features/emergency/session-service.js';
-import { supabaseConfigured, uploadAttachment } from '../../../src/lib/supabase-server.js';
+import { clientAccessToken, verifyClientAccess } from '../../../src/lib/auth-server.js';
+import { getSession, supabaseConfigured, uploadAttachment } from '../../../src/lib/supabase-server.js';
 import { bodyAs, firstQuery, methodNotAllowed, type ApiRequest, type ApiResponse } from '../../../src/lib/vercel-api.js';
 
 const allowedImages = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -19,6 +20,9 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   if (bytes.byteLength > 2 * 1024 * 1024) return response.status(413).json({ message: 'Attachments must be 2 MB or smaller.' });
   try {
     const code = normalizeRoomCode(firstQuery(request.query.code) ?? '');
+    const session = await getSession(code);
+    if (!session) return response.status(404).json({ message: 'Room not found.' });
+    if (!await verifyClientAccess(session.id, clientAccessToken(request))) return response.status(403).json({ message: 'Client access is required.' });
     return response.status(200).json(await uploadAttachment(code, { name: body.name, type: body.mimeType, bytes }));
   } catch {
     return response.status(502).json({ message: 'The attachment could not be uploaded.' });

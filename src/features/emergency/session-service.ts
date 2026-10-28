@@ -1,5 +1,5 @@
 import { createInitialState } from './fixtures.js';
-import { ESCALATION_INTERVAL_MS, PIN_MAX_ATTEMPTS, serviceLabel } from './config.js';
+import { ESCALATION_INTERVAL_MS, PIN_MAX_ATTEMPTS, RESPONDER_HEARTBEAT_TTL_MS, serviceLabel } from './config.js';
 import type {
   AcceptResult,
   AttendanceEntry,
@@ -16,12 +16,14 @@ import type {
   SessionRecord,
   SyncStatus,
 } from './types.js';
+import { staffAuthorizationHeaders } from '../../lib/staff-auth.js';
 
 export const ACTIVE_SESSION_KEY = 'rapidlink-active-session-v2';
 export const DEVICE_IDENTITY_KEY = 'rapidlink-device-identity-v1';
 const CHANNEL_NAME = 'rapidlink-session-events-v2';
 const stateKey = (code: string) => `rapidlink-session-${code}`;
 const queueKey = (code: string) => `rapidlink-actions-${code}`;
+const clientTokenKey = (code: string) => `rapidlink-client-token-${code}`;
 
 const now = () => new Date().toISOString();
 const generatedId = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
@@ -30,6 +32,14 @@ const action = <T extends EmergencyAction['type']>(type: T, payload: Extract<Eme
 
 const storage = () => (typeof window === 'undefined' ? null : window.localStorage);
 const activeCode = () => storage()?.getItem(ACTIVE_SESSION_KEY) ?? null;
+
+const requestHeaders = async (code: string, json = false): Promise<Record<string, string>> => {
+  const headers: Record<string, string> = { ...await staffAuthorizationHeaders() };
+  if (json) headers['content-type'] = 'application/json';
+  const clientToken = storage()?.getItem(clientTokenKey(code));
+  if (clientToken) headers['x-rapidlink-client-token'] = clientToken;
+  return headers;
+};
 
 interface DeviceIdentity {
   profile: ClientProfile;
@@ -52,12 +62,14 @@ const writeDeviceIdentity = (identity: DeviceIdentity) => {
 };
 
 const restoreDeviceIdentity = (state: EmergencyState): EmergencyState => {
+  if (state.accessScope === 'staff') return state;
   if (state.profile && state.profileSecurity) return state;
   const identity = readDeviceIdentity();
   return identity ? { ...state, profile: identity.profile, profileSecurity: identity.security, registrationStatus: 'REGISTERED' } : state;
 };
 
 const rememberDeviceIdentity = (state: EmergencyState) => {
+  if (state.accessScope === 'staff') return state;
   if (state.profile && state.profileSecurity) writeDeviceIdentity({ profile: state.profile, security: state.profileSecurity });
   return state;
 };
@@ -77,6 +89,12 @@ export const employeeDuty = (state: EmergencyState, employeeId: string) => {
 export const employeeBusy = (state: EmergencyState, employeeId: string, excludeIncidentId?: string) =>
   state.incidents.some((incident) => incident.id !== excludeIncidentId && incident.assignedEmployeeId === employeeId && !['completed', 'cancelled'].includes(incident.progress));
 
+export const employeeReachable = (employee: Employee, at = Date.now()) => {
+  if (employee.availability === 'temporarily_unavailable') return false;
+  if (!employee.accessEnabled) return false;
+  return Boolean(employee.lastHeartbeatAt && at - Date.parse(employee.lastHeartbeatAt) <= RESPONDER_HEARTBEAT_TTL_MS);
+};
+
 const stationSupportsIncident = (station: EmergencyState['stations'][number], incident: Incident) =>
   incident.service === 'sos'
     ? station.services.includes('police') && station.services.includes('ambulance')
@@ -87,6 +105,7 @@ const eligibleEmployeesForStation = (state: EmergencyState, incident: Incident, 
     employee.stationId === stationId &&
     (employee.service === incident.service || (incident.service === 'sos' && (employee.service === 'police' || employee.service === 'ambulance'))) &&
     employee.active &&
+    employeeReachable(employee) &&
     !incident.declinedEmployeeIds.includes(employee.id) &&
     employeeDuty(state, employee.id) &&
     !employeeBusy(state, employee.id, incident.id));
@@ -151,13 +170,42 @@ const offersForStation = (state: EmergencyState, incident: Incident, stationId: 
         incidentId: incident.id,
         employeeId: offer.employeeId,
         createdAt,
-        provider: 'simulated' as const,
-        deliveryStatus: 'simulated' as const,
+        channel: 'in_app' as const,
+        provider: 'in_app' as const,
+        deliveryStatus: 'queued' as const,
+        attempts: 0,
         recipientPhone: employee?.phone,
         body: responderMessageBody(incident, stationName, offer.id),
       };
     }),
   };
+};
+
+const addOffersForReachableEmployee = (state: EmergencyState, employeeId: string): EmergencyState => {
+  const employee = state.employees.find((item) => item.id === employeeId);
+  if (!employee || !employeeReachable(employee)) return state;
+  let updated = state;
+  for (const incident of updated.incidents.filter((item) =>
+    item.status === 'WAITING_FOR_RESPONDER' &&
+    !item.assignedEmployeeId &&
+    item.notifiedStationIds.includes(employee.stationId))) {
+    const created = offersForStation(updated, incident, employee.stationId);
+    if (!created.offers.some((offer) => offer.employeeId === employeeId)) continue;
+    const queuedAt = created.messages.at(0)?.createdAt;
+    updated = {
+      ...updated,
+      incidents: updated.incidents.map((item) => item.id === incident.id ? {
+        ...item,
+        deliveryState: 'sent',
+        firstOfferCreatedAt: item.firstOfferCreatedAt ?? created.offers.at(0)?.createdAt,
+        firstNotificationQueuedAt: item.firstNotificationQueuedAt ?? queuedAt,
+        lastUpdatedAt: queuedAt ?? item.lastUpdatedAt,
+      } : item),
+      offers: [...updated.offers, ...created.offers],
+      messages: [...updated.messages, ...created.messages],
+    };
+  }
+  return updated;
 };
 
 const routeIncident = (state: EmergencyState, incident: Incident): EmergencyState => {
@@ -183,9 +231,17 @@ const routeIncident = (state: EmergencyState, incident: Incident): EmergencyStat
   };
   const created = offersForStation(state, routed, station.id);
   const deliveryState = created.offers.length ? 'sent' : 'no_responders';
+  const firstOfferCreatedAt = created.offers.at(0)?.createdAt;
+  const firstNotificationQueuedAt = created.messages.at(0)?.createdAt;
   return {
     ...state,
-    incidents: state.incidents.map((item) => item.id === incident.id ? { ...routed, deliveryState } : item),
+    incidents: state.incidents.map((item) => item.id === incident.id ? {
+      ...routed,
+      deliveryState,
+      firstOfferCreatedAt,
+      firstNotificationQueuedAt,
+      lastUpdatedAt: submittedAt,
+    } : item),
     offers: [...state.offers, ...created.offers],
     messages: [...state.messages, ...created.messages],
   };
@@ -307,6 +363,30 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
     return remember(updated);
   }
   if (event.type === 'end-shift') return remember({ ...current, attendance: current.attendance.map((entry) => entry.employeeId === event.payload.employeeId && isAttendanceActive(entry) ? { ...entry, endedAt: now(), updatedAt: now() } : entry) });
+  if (event.type === 'set-responder-availability') {
+    const changedAt = now();
+    const updated = {
+      ...current,
+      employees: current.employees.map((employee) => employee.id === event.payload.employeeId ? {
+        ...employee,
+        availability: event.payload.availability,
+        availabilityReason: event.payload.availability === 'temporarily_unavailable' ? event.payload.reason?.trim() : undefined,
+        availabilityUpdatedAt: changedAt,
+      } : employee),
+      audit: [...current.audit, {
+        id: generatedId('audit'),
+        type: 'responder-availability',
+        message: `${current.employees.find((employee) => employee.id === event.payload.employeeId)?.employeeNumber ?? 'Responder'} marked ${event.payload.availability}`,
+        createdAt: changedAt,
+      }],
+    };
+    return remember(event.payload.availability === 'available' ? addOffersForReachableEmployee(updated, event.payload.employeeId) : updated);
+  }
+  if (event.type === 'responder-heartbeat') {
+    const heartbeatAt = now();
+    const updated = { ...current, employees: current.employees.map((employee) => employee.id === event.payload.employeeId ? { ...employee, lastHeartbeatAt: heartbeatAt } : employee) };
+    return remember(addOffersForReachableEmployee(updated, event.payload.employeeId));
+  }
   if (event.type === 'add-employee') return remember({ ...current, employees: [...current.employees, { ...event.payload.employee, id: generatedId('employee') }] });
   if (event.type === 'update-employee') return remember({ ...current, employees: current.employees.map((item) => item.id === event.payload.employee.id ? event.payload.employee : item) });
   if (event.type === 'decline-offer') {
@@ -333,9 +413,52 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
     const acceptedAt = now();
     return remember({
       ...current,
-      incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, assignedEmployeeId: employee.id, acceptedAt, progress: 'accepted', status: 'ACCEPTED', escalationStatus: 'STOPPED', nextEscalationAt: undefined } : item),
+      incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, assignedEmployeeId: employee.id, acceptedAt, lastUpdatedAt: acceptedAt, progress: 'accepted', status: 'ACCEPTED', escalationStatus: 'STOPPED', nextEscalationAt: undefined } : item),
       offers: current.offers.map((item) => item.incidentId !== incident.id ? item : item.id === offer.id ? { ...item, status: 'accepted', respondedAt: acceptedAt } : { ...item, status: 'closed' }),
       audit: [...current.audit, { id: generatedId('audit'), type: 'accepted', message: `${employee.employeeNumber} accepted ${incident.reference}`, createdAt: acceptedAt }],
+    });
+  }
+  if (event.type === 'mark-notification-delivered' || event.type === 'mark-notification-read') {
+    const message = current.messages.find((item) => item.id === event.payload.messageId);
+    if (!message) return remember(current);
+    const changedAt = now();
+    const isRead = event.type === 'mark-notification-read';
+    return remember({
+      ...current,
+      messages: current.messages.map((item) => item.id === message.id ? {
+        ...item,
+        deliveryStatus: isRead ? 'read' : item.deliveryStatus === 'read' ? 'read' : 'delivered',
+        deliveredAt: item.deliveredAt ?? changedAt,
+        readAt: isRead ? changedAt : item.readAt,
+      } : item),
+      incidents: current.incidents.map((incident) => incident.id === message.incidentId ? {
+        ...incident,
+        deliveryState: 'delivered',
+        firstNotificationDeliveredAt: incident.firstNotificationDeliveredAt ?? changedAt,
+        lastUpdatedAt: changedAt,
+      } : incident),
+    });
+  }
+  if (event.type === 'record-notification-result') {
+    const message = current.messages.find((item) => item.id === event.payload.messageId);
+    if (!message || ['delivered', 'read'].includes(message.deliveryStatus ?? '')) return remember(current);
+    const changedAt = now();
+    const failed = event.payload.status !== 'submitted';
+    return remember({
+      ...current,
+      messages: current.messages.map((item) => item.id === message.id ? {
+        ...item,
+        provider: 'web_push',
+        deliveryStatus: event.payload.status,
+        attempts: (item.attempts ?? 0) + 1,
+        submittedAt: failed ? item.submittedAt : changedAt,
+        failedAt: failed ? changedAt : undefined,
+      } : item),
+      incidents: current.incidents.map((incident) => incident.id === message.incidentId ? {
+        ...incident,
+        deliveryState: failed && !current.messages.some((item) => item.incidentId === incident.id && item.id !== message.id && ['submitted', 'delivered', 'read'].includes(item.deliveryStatus ?? '')) ? 'failed' : incident.deliveryState,
+        lastUpdatedAt: changedAt,
+      } : incident),
     });
   }
   if (event.type === 'update-progress') {
@@ -347,7 +470,14 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
     const updatedAt = now();
     return remember({
       ...current,
-      incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, progress: event.payload.progress, status: statusByProgress[event.payload.progress as keyof typeof statusByProgress] } : item),
+      incidents: current.incidents.map((item) => item.id === incident.id ? {
+        ...item,
+        progress: event.payload.progress,
+        status: statusByProgress[event.payload.progress as keyof typeof statusByProgress],
+        enRouteAt: event.payload.progress === 'en_route' ? item.enRouteAt ?? updatedAt : item.enRouteAt,
+        arrivedAt: event.payload.progress === 'arrived' ? item.arrivedAt ?? updatedAt : item.arrivedAt,
+        lastUpdatedAt: updatedAt,
+      } : item),
       audit: [...current.audit, { id: generatedId('audit'), type: `progress-${event.payload.progress.replace('_', '-')}`, message: `${employee.employeeNumber} marked ${incident.reference} ${event.payload.progress}`, createdAt: updatedAt }],
     });
   }
@@ -362,7 +492,7 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
       const cancelledAt = now();
       return remember({
         ...current,
-        incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, status: 'CANCELLED', progress: 'cancelled', escalationStatus: 'STOPPED', nextEscalationAt: undefined } : item),
+        incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, status: 'CANCELLED', progress: 'cancelled', cancelledAt, lastUpdatedAt: cancelledAt, escalationStatus: 'STOPPED', nextEscalationAt: undefined } : item),
         offers: current.offers.map((offer) => offer.incidentId === incident.id && offer.status === 'open' ? { ...offer, status: 'closed' } : offer),
         audit: [...current.audit, { id: generatedId('audit'), type: 'cancelled', message: `${incident.reference} cancelled by client`, createdAt: cancelledAt }],
       });
@@ -383,7 +513,7 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
     if (event.payload.acknowledge) {
       return remember({
         ...current,
-        incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, status: 'CANCELLED', progress: 'cancelled', cancellationResponse: 'acknowledged' } : item),
+        incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, status: 'CANCELLED', progress: 'cancelled', cancellationResponse: 'acknowledged', cancelledAt: respondedAt, lastUpdatedAt: respondedAt } : item),
         audit: [...current.audit, { id: generatedId('audit'), type: 'cancellation-acknowledged', message: `${employee?.employeeNumber ?? 'Responder'} acknowledged cancellation for ${incident.reference}`, createdAt: respondedAt }],
       });
     }
@@ -419,9 +549,41 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
     }
     return remember({
       ...current,
-      incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, status: 'COMPLETED', progress: 'completed', completionRequestStatus: 'confirmed', completedAt: confirmedAt } : item),
+      incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, status: 'COMPLETED', progress: 'completed', completionRequestStatus: 'confirmed', completionSource: 'client_confirmation', completedAt: confirmedAt, lastUpdatedAt: confirmedAt } : item),
       offers: current.offers.map((offer) => offer.incidentId === incident.id && offer.status === 'open' ? { ...offer, status: 'closed' } : offer),
       audit: [...current.audit, { id: generatedId('audit'), type: 'completed', message: `${incident.reference} help confirmed and incident completed`, createdAt: confirmedAt }],
+    });
+  }
+  if (event.type === 'complete-handover') {
+    const incident = current.incidents.find((item) => item.id === event.payload.incidentId);
+    const employee = current.employees.find((item) => item.id === event.payload.employeeId);
+    if (!incident || !employee || incident.assignedEmployeeId !== employee.id || incident.status !== 'ARRIVED') return remember(current);
+    const completedAt = now();
+    const handover = { ...event.payload.handover, startedAt: completedAt, completedAt };
+    return remember({
+      ...current,
+      incidents: current.incidents.map((item) => item.id === incident.id ? {
+        ...item,
+        status: 'COMPLETED',
+        progress: 'completed',
+        handover,
+        completionSource: 'verified_handover',
+        completedAt,
+        lastUpdatedAt: completedAt,
+      } : item),
+      offers: current.offers.map((offer) => offer.incidentId === incident.id && offer.status === 'open' ? { ...offer, status: 'closed' } : offer),
+      audit: [...current.audit, { id: generatedId('audit'), type: 'handover-completed', message: `${employee.employeeNumber} recorded verified handover for ${incident.reference}`, createdAt: completedAt }],
+    });
+  }
+  if (event.type === 'supervisor-close-incident') {
+    const incident = current.incidents.find((item) => item.id === event.payload.incidentId);
+    const reason = event.payload.reason.trim();
+    if (!incident || !incident.assignedEmployeeId || !['ARRIVED', 'HANDOVER_IN_PROGRESS'].includes(incident.status) || reason.length < 10) return remember(current);
+    const completedAt = now();
+    return remember({
+      ...current,
+      incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, status: 'COMPLETED', progress: 'completed', completionSource: 'supervisor_override', completedAt, lastUpdatedAt: completedAt } : item),
+      audit: [...current.audit, { id: generatedId('audit'), type: 'supervisor-override', message: `${incident.reference} closed by supervisor: ${reason}`, createdAt: completedAt }],
     });
   }
   return remember(current);
@@ -440,6 +602,7 @@ const statusFromProgress = (progress: IncidentProgress): Incident['status'] => {
   if (progress === 'accepted') return 'ACCEPTED';
   if (progress === 'en_route') return 'EN_ROUTE';
   if (progress === 'arrived') return 'ARRIVED';
+  if (progress === 'handover_in_progress') return 'HANDOVER_IN_PROGRESS';
   if (progress === 'cancellation_requested') return 'CANCELLATION_REQUESTED';
   if (progress === 'cancelled') return 'CANCELLED';
   return 'COMPLETED';
@@ -455,6 +618,20 @@ export const normalizeEmergencyState = (saved: Partial<EmergencyState>): Emergen
     profile,
     profileSecurity: profile ? saved.profileSecurity ?? null : null,
     registrationStatus: profile && saved.profileSecurity ? 'REGISTERED' : 'NOT_REGISTERED',
+    employees: (saved.employees ?? initial.employees).map((employee) => ({
+      ...employee,
+      availability: employee.availability ?? 'available',
+    })),
+    messages: (saved.messages ?? []).map((message) => {
+      const legacyDelivery = message.deliveryStatus as string | undefined;
+      return {
+        ...message,
+        channel: message.channel ?? 'in_app',
+        provider: message.provider === 'sms' ? 'sms' : 'in_app',
+        deliveryStatus: legacyDelivery === 'sent' ? 'submitted' : legacyDelivery === 'simulated' ? 'queued' : message.deliveryStatus ?? 'queued',
+        attempts: message.attempts ?? 0,
+      };
+    }),
     incidents: (saved.incidents ?? []).map((incident) => ({
       ...incident,
       status: incident.status ?? statusFromProgress(incident.progress),
@@ -502,7 +679,7 @@ const uploadQueuedMedia = async (code: string, event: EmergencyAction): Promise<
     if (!attachment.dataUrl.startsWith('data:')) return attachment;
     const response = await fetch(`/api/sessions/${code}/attachments`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: await requestHeaders(code, true),
       body: JSON.stringify({ name: attachment.name, mimeType: attachment.mimeType, dataUrl: attachment.dataUrl }),
     });
     if (!response.ok) return attachment;
@@ -515,7 +692,7 @@ const uploadQueuedMedia = async (code: string, event: EmergencyAction): Promise<
 export async function syncFromRemote(code = activeCode()) {
   if (!code || typeof navigator === 'undefined' || !navigator.onLine) return readState(code ?? 'LOCAL1');
   try {
-    const response = await fetch(`/api/sessions/${code}`, { cache: 'no-store' });
+    const response = await fetch(`/api/sessions/${code}`, { headers: await requestHeaders(code), cache: 'no-store' });
     if (!response.ok) { remoteAvailable = response.status !== 503; return readState(code); }
     const record = await response.json() as SessionRecord;
     remoteAvailable = true;
@@ -534,7 +711,7 @@ export async function flushPending(code = activeCode()) {
     while (queue.length) {
       const queuedAction = queue[0];
       const nextAction = await uploadQueuedMedia(code, queuedAction);
-      const response = await fetch(`/api/sessions/${code}/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(nextAction) });
+      const response = await fetch(`/api/sessions/${code}/actions`, { method: 'POST', headers: await requestHeaders(code, true), body: JSON.stringify(nextAction) });
       if (!response.ok) { remoteAvailable = response.status !== 503; break; }
       const record = await response.json() as SessionRecord;
       queue = readQueue(code).filter((event) => event.id !== queuedAction.id);
@@ -561,7 +738,11 @@ export async function createSession(code = generateRoomCode()) {
   let state = createInitialState();
   try {
     const response = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: normalized }) });
-    if (response.ok) state = ((await response.json()) as SessionRecord).state;
+    if (response.ok) {
+      const created = await response.json() as SessionRecord & { clientToken?: string };
+      state = created.state;
+      if (created.clientToken) storage()?.setItem(clientTokenKey(normalized), created.clientToken);
+    }
     remoteAvailable = response.ok;
   } catch { remoteAvailable = false; }
   writeQueue(normalized, []);
@@ -575,7 +756,7 @@ export async function joinSession(code: string) {
   const normalized = normalizeRoomCode(code);
   if (normalized.length !== 6) throw new Error('Enter a six-character access code.');
   storage()?.setItem(ACTIVE_SESSION_KEY, normalized);
-  const response = await fetch(`/api/sessions/${normalized}`, { cache: 'no-store' }).catch(() => null);
+  const response = await fetch(`/api/sessions/${normalized}`, { headers: await requestHeaders(normalized), cache: 'no-store' }).catch(() => null);
   if (response?.ok) {
     remoteAvailable = true;
     const record = await response.json() as SessionRecord;
@@ -631,8 +812,26 @@ export const sessionService = {
   updateProfile(profile: ClientProfile) {
     return rememberDeviceIdentity(commit(action('update-profile', { profile })));
   },
-  changePin(security: CancellationPinRecord) {
-    return rememberDeviceIdentity(commit(action('change-pin', { security })));
+  async changePin(currentPin: string, nextPin: string): Promise<{ ok: boolean; lockedForSeconds?: number; attemptsRemaining?: number }> {
+    const code = activeCode();
+    if (!code) return { ok: false, attemptsRemaining: 0 };
+    try {
+      const response = await fetch(`/api/sessions/${code}/pin`, {
+        method: 'POST',
+        headers: await requestHeaders(code, true),
+        body: JSON.stringify({ currentPin, nextPin }),
+      });
+      const result = await response.json() as {
+        ok?: boolean;
+        lockedForSeconds?: number;
+        attemptsRemaining?: number;
+        record?: SessionRecord;
+      };
+      if (result.record?.state) rememberDeviceIdentity(receiveRemoteState(code, result.record.state));
+      return { ok: Boolean(result.ok), lockedForSeconds: result.lockedForSeconds, attemptsRemaining: result.attemptsRemaining };
+    } catch {
+      return { ok: false };
+    }
   },
   recordPinFailure(lockedUntil?: string) { return rememberDeviceIdentity(commit(action('record-pin-failure', { lockedUntil }))); },
   clearPinFailures() { return rememberDeviceIdentity(commit(action('clear-pin-failures', {}))); },
@@ -653,6 +852,7 @@ export const sessionService = {
     if (!offer || !incident || !employee || offer.status !== 'open') return { ok: false, reason: 'invalid' };
     if (incident.assignedEmployeeId && incident.assignedEmployeeId !== employee.id) return { ok: false, reason: 'assigned' };
     if (!employee.active) return { ok: false, reason: 'inactive' };
+    if (!employeeReachable(employee)) return { ok: false, reason: 'inactive' };
     if (!employeeDuty(state, employee.id)) return { ok: false, reason: 'off_duty' };
     if (employeeBusy(state, employee.id, incident.id)) return { ok: false, reason: 'busy' };
     commit(action('accept-offer', { offerId }));
@@ -661,8 +861,38 @@ export const sessionService = {
     return accepted?.assignedEmployeeId === employee.id ? { ok: true, incident: accepted, employee } : { ok: false, reason: 'assigned' };
   },
   updateIncidentProgress(incidentId: string, employeeId: string, progress: IncidentProgress) { return commit(action('update-progress', { incidentId, employeeId, progress })); },
-  cancelIncident(incidentId: string) { return commit(action('cancel-incident', { incidentId })); },
+  setResponderAvailability(employeeId: string, availability: Employee['availability'], reason?: string) { return commit(action('set-responder-availability', { employeeId, availability, reason })); },
+  responderHeartbeat(employeeId: string) { return commit(action('responder-heartbeat', { employeeId })); },
+  markNotificationDelivered(messageId: string) { return commit(action('mark-notification-delivered', { messageId })); },
+  markNotificationRead(messageId: string) { return commit(action('mark-notification-read', { messageId })); },
+  async cancelIncident(incidentId: string, pin: string): Promise<{ ok: boolean; lockedForSeconds?: number; attemptsRemaining?: number }> {
+    const code = activeCode();
+    if (!code) return { ok: false, attemptsRemaining: 0 };
+    try {
+      const response = await fetch(`/api/sessions/${code}/cancel`, {
+        method: 'POST',
+        headers: await requestHeaders(code, true),
+        body: JSON.stringify({ incidentId, pin }),
+      });
+      const result = await response.json() as {
+        ok?: boolean;
+        lockedForSeconds?: number;
+        attemptsRemaining?: number;
+        record?: SessionRecord;
+      };
+      if (result.record?.state) receiveRemoteState(code, result.record.state);
+      return {
+        ok: Boolean(result.ok),
+        lockedForSeconds: result.lockedForSeconds,
+        attemptsRemaining: result.attemptsRemaining,
+      };
+    } catch {
+      return { ok: false };
+    }
+  },
   respondToCancellation(incidentId: string, employeeId: string, acknowledge: boolean) { return commit(action('respond-cancellation', { incidentId, employeeId, acknowledge })); },
   requestCompletion(incidentId: string, employeeId: string) { return commit(action('request-completion', { incidentId, employeeId })); },
   confirmHelpReceived(incidentId: string, received: boolean) { return commit(action('confirm-help-received', { incidentId, received })); },
+  completeHandover(incidentId: string, employeeId: string, handover: Extract<EmergencyAction, { type: 'complete-handover' }>['payload']['handover']) { return commit(action('complete-handover', { incidentId, employeeId, handover })); },
+  supervisorCloseIncident(incidentId: string, reason: string) { return commit(action('supervisor-close-incident', { incidentId, reason })); },
 };

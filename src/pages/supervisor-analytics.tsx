@@ -4,14 +4,15 @@ import { Link } from 'react-router-dom';
 
 import { AccessibleModal } from '@/components/accessible-modal';
 import { Button } from '@/components/ui/button';
+import { useStaffAuth } from '@/features/auth/staff-auth-context';
 import { serviceLabel } from '@/features/emergency/config';
 import { useEmergency } from '@/features/emergency/emergency-context';
+import { sessionService } from '@/features/emergency/session-service';
 import type { Incident, ServiceType } from '@/features/emergency/types';
 
-const SUPERVISOR_STATION_ID = 'station-garankuwa';
 type StatusFilter = 'all' | 'active' | 'completed' | 'cancelled';
 
-const activeStatuses = new Set(['CREATING', 'WAITING_FOR_RESPONDER', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'CANCELLATION_REQUESTED']);
+const activeStatuses = new Set(['CREATING', 'WAITING_FOR_RESPONDER', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'HANDOVER_IN_PROGRESS', 'CANCELLATION_REQUESTED']);
 
 function minutesBetween(start: string, end?: string) {
   if (!end) return null;
@@ -61,6 +62,8 @@ function auditLabel(type: string) {
     'cancellation-continued': 'Response continued',
     'closure-requested': 'Closure requested',
     'closure-declined': 'More help requested',
+    'handover-completed': 'Verified handover completed',
+    'supervisor-override': 'Closed by supervisor override',
     completed: 'Help received and report closed',
     cancelled: 'Report cancelled',
   };
@@ -68,12 +71,14 @@ function auditLabel(type: string) {
 }
 
 export default function SupervisorAnalyticsPage() {
-  const { state, online } = useEmergency();
-  const station = state.stations.find((item) => item.id === SUPERVISOR_STATION_ID)!;
+  const { state, online, refresh } = useEmergency();
+  const { identity } = useStaffAuth();
+  const station = state.stations.find((item) => item.id === identity?.stationId)!;
   const [service, setService] = useState<ServiceType | 'all'>('all');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [query, setQuery] = useState('');
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
+  const [overrideReason, setOverrideReason] = useState('');
 
   const stationEmployees = useMemo(
     () => state.employees.filter((employee) => employee.stationId === station.id),
@@ -127,6 +132,13 @@ export default function SupervisorAnalyticsPage() {
   const selectedResponder = selectedAssignedEmployee?.stationId === station.id ? selectedAssignedEmployee : undefined;
   const selectedStationOffers = selectedIncident ? state.offers.filter((offer) => offer.incidentId === selectedIncident.id && stationEmployeeIds.has(offer.employeeId)) : [];
   const selectedAudit = selectedIncident ? state.audit.filter((entry) => entry.message.includes(selectedIncident.reference)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)) : [];
+  const closeByOverride = () => {
+    if (!selectedIncident || overrideReason.trim().length < 10) return;
+    sessionService.supervisorCloseIncident(selectedIncident.id, overrideReason);
+    refresh();
+    setOverrideReason('');
+    setSelectedIncidentId(null);
+  };
 
   const responderName = (incident: Incident) => {
     const employee = state.employees.find((item) => item.id === incident.assignedEmployeeId);
@@ -201,7 +213,11 @@ export default function SupervisorAnalyticsPage() {
             <div><dt className="text-xs font-semibold text-slate-500">Stations notified</dt><dd className="mt-1 font-bold text-slate-900">{selectedIncident.notifiedStationIds.length}</dd></div>
           </dl>
 
-          <section className="mt-5" aria-labelledby="handling-heading"><h3 id="handling-heading" className="font-extrabold text-[#003172]">How it was handled</h3><div className="mt-3 divide-y divide-slate-100 rounded-xl border border-slate-200 text-sm"><div className="flex gap-3 p-3"><Activity className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><p className="text-slate-700">{selectedStationOffers.length} responder offer{selectedStationOffers.length === 1 ? '' : 's'} sent; {selectedStationOffers.filter((offer) => offer.status === 'declined').length} declined.</p></div><div className="flex gap-3 p-3">{selectedIncident.status === 'COMPLETED' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" /> : selectedIncident.status === 'CANCELLED' ? <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /> : <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-[#003172]" />}<p className="text-slate-700">{selectedIncident.status === 'COMPLETED' ? 'The client confirmed that help was received.' : selectedIncident.status === 'CANCELLED' ? `The request was cancelled${selectedIncident.cancellationResponse === 'acknowledged' ? ' and acknowledged by the responder' : ''}.` : `The report is ${statusLabel(selectedIncident).toLowerCase()}.`}</p></div></div></section>
+          <section className="mt-5" aria-labelledby="handling-heading"><h3 id="handling-heading" className="font-extrabold text-[#003172]">How it was handled</h3><div className="mt-3 divide-y divide-slate-100 rounded-xl border border-slate-200 text-sm"><div className="flex gap-3 p-3"><Activity className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><p className="text-slate-700">{selectedStationOffers.length} responder offer{selectedStationOffers.length === 1 ? '' : 's'} sent; {selectedStationOffers.filter((offer) => offer.status === 'declined').length} declined.</p></div><div className="flex gap-3 p-3">{selectedIncident.status === 'COMPLETED' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" /> : selectedIncident.status === 'CANCELLED' ? <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /> : <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-[#003172]" />}<p className="text-slate-700">{selectedIncident.status === 'COMPLETED' ? selectedIncident.completionSource === 'verified_handover' ? 'The response ended after a recorded handover.' : selectedIncident.completionSource === 'supervisor_override' ? 'The response was closed through an audited supervisor override.' : 'The client confirmed that help was received.' : selectedIncident.status === 'CANCELLED' ? `The request was cancelled${selectedIncident.cancellationResponse === 'acknowledged' ? ' and acknowledged by the responder' : ''}.` : `The report is ${statusLabel(selectedIncident).toLowerCase()}.`}</p></div></div></section>
+
+          {selectedIncident.handover && <section className="mt-5 bg-slate-50 p-4"><h3 className="font-extrabold text-[#003172]">Handover</h3><dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2"><div><dt className="text-slate-500">Destination</dt><dd className="font-bold">{selectedIncident.handover.destinationName}</dd></div><div><dt className="text-slate-500">Received by</dt><dd className="font-bold">{selectedIncident.handover.receivingPersonName} · {selectedIncident.handover.receivingPersonRole}</dd></div><div><dt className="text-slate-500">Reference</dt><dd className="font-bold">{selectedIncident.handover.verificationReference}</dd></div><div><dt className="text-slate-500">Completed</dt><dd className="font-bold">{selectedIncident.handover.completedAt ? new Date(selectedIncident.handover.completedAt).toLocaleString() : 'Pending'}</dd></div></dl></section>}
+
+          {selectedIncident.status === 'ARRIVED' && <section className="mt-5 border-t border-slate-200 pt-4"><h3 className="font-extrabold text-[#003172]">Supervisor closure override</h3><p className="mt-1 text-sm text-slate-600">Use only when the client cannot confirm and no handover can be recorded. The reason is permanently audited.</p><label className="mt-3 block text-sm font-bold text-slate-700">Reason<textarea value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} rows={3} className="mt-2 w-full border border-slate-300 p-3" /></label><Button variant="emergency" className="mt-3 min-h-12 w-full" disabled={overrideReason.trim().length < 10} onClick={closeByOverride}>Close with audited override</Button></section>}
 
           <section className="mt-5 border-t border-slate-200 pt-4" aria-labelledby="activity-heading"><h3 id="activity-heading" className="font-extrabold text-[#003172]">Activity</h3>{selectedAudit.length ? <ol className="mt-3 space-y-3">{selectedAudit.map((entry) => <li key={entry.id} className="flex gap-3 text-sm"><span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#003172]" /><div><p className="font-bold text-slate-800">{auditLabel(entry.type)}</p><p className="text-xs text-slate-500">{new Date(entry.createdAt).toLocaleString()}</p></div></li>)}</ol> : <p className="mt-2 text-sm text-slate-500">No activity recorded.</p>}</section>
           <p className="mt-5 flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-xs font-semibold text-slate-500"><ShieldCheck className="h-4 w-4 shrink-0 text-[#003172]" /> Location, descriptions and attachments remain restricted.</p>

@@ -3,9 +3,7 @@ import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
-import { AccessibleModal } from '@/components/accessible-modal';
 import { useEmergency } from '@/features/emergency/emergency-context';
-import { PinRecoveryForm, recoveryDestination, type RecoveryMethod } from '@/features/profile/pin-recovery';
 import { pinFieldClass, ProfileFields } from '@/features/profile/profile-fields';
 import { changeCancellationPin, updateProfile } from '@/features/profile/profile-service';
 import { normalizePhone, validatePin, validateProfile, type ProfileErrors } from '@/features/profile/validation';
@@ -74,8 +72,6 @@ export default function ClientProfilePage() {
   const [showCurrentPin, setShowCurrentPin] = useState(false);
   const [showNextPin, setShowNextPin] = useState(false);
   const [showConfirmPin, setShowConfirmPin] = useState(false);
-  const [recoveryOpen, setRecoveryOpen] = useState(false);
-  const [recoverySent, setRecoverySent] = useState<RecoveryMethod | null>(null);
 
   const saveDetails = (event: FormEvent) => {
     event.preventDefault();
@@ -160,14 +156,10 @@ export default function ClientProfilePage() {
               <PinInput id="confirm-new-pin" label="Confirm new PIN" value={confirmPin} visible={showConfirmPin} error={errors.confirmPin} autoComplete="new-password" onChange={setConfirmPin} onToggle={() => setShowConfirmPin((visible) => !visible)} />
             </div>
             <div className={`mt-5 min-h-5 text-sm font-semibold ${pinMessage === 'PIN changed.' ? 'text-emerald-700' : 'text-slate-600'}`} aria-live="polite">{pinMessage}</div>
-            <div className="mt-3 grid gap-2 sm:grid-cols-2"><Button variant="outline" className="min-h-12">Change PIN</Button><Button type="button" variant="ghost" className="min-h-12" onClick={() => { setRecoverySent(null); setRecoveryOpen(true); }}>Forgot PIN?</Button></div>
+            <div className="mt-3"><Button variant="outline" className="min-h-12 w-full sm:w-auto">Change PIN</Button></div>
           </form>
         </section>
       </div>
-
-      <AccessibleModal open={recoveryOpen} title={recoverySent ? (recoverySent === 'email' ? 'Check your email' : 'Check your messages') : 'Reset cancellation PIN'} description={recoverySent ? undefined : 'Choose where to receive reset instructions.'} onClose={() => setRecoveryOpen(false)}>
-        {recoverySent ? <div><div className="flex items-start gap-3 rounded-xl bg-emerald-50 p-4 text-emerald-950"><CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" /><p className="font-bold">Reset instructions were sent to {recoveryDestination(recoverySent, current.phone, current.email)}.</p></div><Button className="mt-5 min-h-12 w-full" onClick={() => setRecoveryOpen(false)}>Done</Button></div> : <PinRecoveryForm phone={current.phone} email={current.email} onSend={setRecoverySent} onCancel={() => setRecoveryOpen(false)} />}
-      </AccessibleModal>
     </main>
   );
 }

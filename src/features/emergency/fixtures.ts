@@ -37,7 +37,7 @@ export const seedStations: Station[] = [
   },
 ];
 
-export const seedEmployees: Employee[] = [
+const employeeFixtures: Array<Omit<Employee, 'availability'>> = [
   { id: 'employee-p01', employeeNumber: 'P-1048', name: 'Lerato', surname: 'Mokoena', phone: '071 555 0101', service: 'police', stationId: 'station-central', active: true },
   { id: 'employee-p02', employeeNumber: 'P-1182', name: 'Kagiso', surname: 'Molefe', phone: '071 555 0102', service: 'police', stationId: 'station-central', active: true },
   { id: 'employee-a01', employeeNumber: 'A-2071', name: 'Amogelang', surname: 'Dube', phone: '071 555 0201', service: 'ambulance', stationId: 'station-central', active: true },
@@ -54,6 +54,11 @@ export const seedEmployees: Employee[] = [
   { id: 'employee-gf01', employeeNumber: 'F-3406', name: 'Kabelo', surname: 'Mosiane', phone: '071 555 0405', service: 'fire', stationId: 'station-garankuwa', active: true },
   { id: 'employee-gf02', employeeNumber: 'F-3412', name: 'Onthatile', surname: 'Moagi', phone: '071 555 0406', service: 'fire', stationId: 'station-garankuwa', active: true },
 ];
+
+export const seedEmployees: Employee[] = employeeFixtures.map((employee) => ({
+  ...employee,
+  availability: 'available',
+}));
 
 export const createInitialState = (): EmergencyState => {
   const now = new Date().toISOString();

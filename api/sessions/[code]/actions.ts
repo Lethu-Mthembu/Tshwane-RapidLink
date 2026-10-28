@@ -1,6 +1,8 @@
 import { applyEmergencyAction, normalizeEmergencyState, normalizeRoomCode } from '../../../src/features/emergency/session-service.js';
 import type { EmergencyAction } from '../../../src/features/emergency/types.js';
+import { authorizeAction, redactStateForStaff } from '../../../src/lib/auth-server.js';
 import { commitSessionAction, getSession, supabaseConfigured } from '../../../src/lib/supabase-server.js';
+import { dispatchQueuedPushNotifications } from '../../../src/lib/web-push-server.js';
 import { bodyAs, firstQuery, methodNotAllowed, type ApiRequest, type ApiResponse } from '../../../src/lib/vercel-api.js';
 
 export default async function handler(request: ApiRequest, response: ApiResponse) {
@@ -13,8 +15,19 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const record = await getSession(code);
       if (!record) return response.status(404).json({ message: 'Room not found.' });
+      const actor = await authorizeAction(request, record.id, record.code, normalizeEmergencyState(record.state), event);
+      if (!actor) return response.status(403).json({ message: 'You are not allowed to perform this action.' });
       const updated = await commitSessionAction(record, applyEmergencyAction(normalizeEmergencyState(record.state), event), event);
-      if (updated) return response.status(200).json(updated);
+      if (updated) {
+        let latest = updated;
+        const push = await dispatchQueuedPushNotifications(updated.id, updated.code).catch(() => null);
+        for (const result of push?.results ?? []) {
+          const notificationEvent: EmergencyAction = { id: crypto.randomUUID(), type: 'record-notification-result', payload: result };
+          const committed = await commitSessionAction(latest, applyEmergencyAction(normalizeEmergencyState(latest.state), notificationEvent), notificationEvent);
+          if (committed) latest = committed;
+        }
+        return response.status(200).json(actor.kind === 'staff' ? { ...latest, state: redactStateForStaff(latest.state, actor.identity) } : latest);
+      }
     }
     return response.status(409).json({ message: 'The room changed too quickly. Retry the action.' });
   } catch {

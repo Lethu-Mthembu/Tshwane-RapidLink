@@ -49,14 +49,21 @@ export async function purgeExpiredSessions() {
   });
 }
 
-export async function upsertSession(code: string, state: EmergencyState): Promise<SessionRecord> {
+export async function upsertSession(code: string, state: EmergencyState, clientTokenHash?: string): Promise<SessionRecord> {
   if (!supabaseConfigured) throw new Error('Supabase is not configured');
   const timestamp = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
-  const response = await fetch(`${url}/rest/v1/rapidlink_sessions?on_conflict=code`, {
+  const response = await fetch(`${url}/rest/v1/rapidlink_sessions`, {
     method: 'POST',
-    headers: headers({ 'content-type': 'application/json', prefer: 'resolution=merge-duplicates,return=representation' }),
-    body: JSON.stringify({ code, state, version: 0, updated_at: timestamp, expires_at: expiresAt }),
+    headers: headers({ 'content-type': 'application/json', prefer: 'return=representation' }),
+    body: JSON.stringify({
+      code,
+      state,
+      version: 0,
+      updated_at: timestamp,
+      expires_at: expiresAt,
+      ...(clientTokenHash ? { client_token_hash: clientTokenHash, client_token_created_at: timestamp } : {}),
+    }),
     cache: 'no-store',
   });
   if (!response.ok) throw new Error(`Session creation failed: ${response.status}`);
@@ -113,6 +120,22 @@ export async function listDueSessions(at = new Date()): Promise<SessionRecord[]>
     { headers: headers(), cache: 'no-store' },
   );
   if (!sessionResponse.ok) throw new Error(`Due session lookup failed: ${sessionResponse.status}`);
+  return (await sessionResponse.json() as SessionRow[]).map(toRecord);
+}
+
+export async function listNotificationSessions(at = new Date()): Promise<SessionRecord[]> {
+  if (!supabaseConfigured) return [];
+  const outboxResponse = await fetch(
+    `${url}/rest/v1/rapidlink_notification_outbox?delivery_status=in.(queued,failed,no_subscription)&attempts=lt.3&select=session_id`,
+    { headers: headers(), cache: 'no-store' },
+  );
+  if (!outboxResponse.ok) throw new Error(`Notification session lookup failed: ${outboxResponse.status}`);
+  const rows = await outboxResponse.json() as Array<{ session_id: string }>;
+  const sessionIds = [...new Set(rows.map((row) => row.session_id))];
+  if (!sessionIds.length) return [];
+  const filter = encodeURIComponent(`(${sessionIds.join(',')})`);
+  const sessionResponse = await fetch(`${url}/rest/v1/rapidlink_sessions?id=in.${filter}&expires_at=gt.${encodeURIComponent(at.toISOString())}&select=*`, { headers: headers(), cache: 'no-store' });
+  if (!sessionResponse.ok) throw new Error(`Notification session load failed: ${sessionResponse.status}`);
   return (await sessionResponse.json() as SessionRow[]).map(toRecord);
 }
 

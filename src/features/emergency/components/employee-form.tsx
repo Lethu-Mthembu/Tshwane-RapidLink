@@ -14,6 +14,7 @@ const emptyEmployee = (stationId: string): Omit<Employee, 'id'> => ({
   service: 'police',
   stationId,
   active: true,
+  availability: 'available',
 });
 
 export function EmployeeForm({

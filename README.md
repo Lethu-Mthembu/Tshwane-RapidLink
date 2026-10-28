@@ -14,16 +14,19 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173) to enter the client flow. Use `/session` only when you need to create or join a shared room. Separate tabs in the same browser continue to work if the network is disconnected.
+Open [http://localhost:5173](http://localhost:5173) to enter the client flow. Use `/session` to create an operations workspace. Staff join through authenticated accounts; a workspace code alone does not grant access.
 
 ## Frontend routes
 
 - `http://localhost:5173/` — redirect to client registration or the emergency page
-- `http://localhost:5173/session` — create or join a shared room
+- `http://localhost:5173/session` — create an operations workspace and open staff onboarding links
 - `http://localhost:5173/register` — first-time client registration
 - `http://localhost:5173/client` — client emergency request and live status
 - `http://localhost:5173/client/profile` — edit client details or change the cancellation PIN
-- `http://localhost:5173/supervisor` — station employee management
+- `http://localhost:5173/staff/sign-in` — responder and supervisor sign-in
+- `http://localhost:5173/staff/activate` — one-time responder account activation
+- `http://localhost:5173/staff/bootstrap` — one-time first-supervisor setup
+- `http://localhost:5173/supervisor` — station employee and app-access management
 - `http://localhost:5173/supervisor/attendance` — daily attendance and shifts
 - `http://localhost:5173/responder` — responder entry point
 - `http://localhost:5173/responder/offers/{offerId}` — unique responder offer
@@ -39,28 +42,36 @@ The plain Vite development server uses the local-only fallback because it does n
 2. Open the Client interface and enable location or use the Ga-Rankuwa preset.
 3. Press SOS or choose a service. The request is transmitted immediately to the closest appropriate station.
 4. If nobody accepts after 30 seconds, the persisted scheduler notifies the next closest appropriate station. Earlier offers remain open and the first valid acceptance wins.
-5. Open Responder Messages on another tab or device, then use the response link in the SMS message. The link includes the workspace code so the incident can load on a different browser.
-6. Update the response through En route and Arrived. The responder requests closure, but the incident closes only after the client confirms that help was received.
+5. The supervisor creates a one-time activation link for each responder. The responder signs in, marks themselves available and enables device notifications. In-app notification is the primary channel; SMS is reserved as a future fallback.
+6. The responder opens an offer, accepts it, and updates the response through En route and Arrived. The responder requests closure, but the incident closes only after the client confirms that help was received, a verified handover is recorded, or a supervisor uses an audited override.
 7. To cancel, the client enters the six-digit cancellation PIN. A waiting request is cancelled immediately; an accepted request remains active until the assigned responder acknowledges the cancellation.
 
 The Supervisor interface controls employee records and attendance. Reset room data returns the room to its initial seeded state.
 
 ## Cross-device rooms with Supabase
 
-Create a Supabase project and apply both migrations in order:
+Create a Supabase project and apply the migrations in order:
 
 1. [`supabase/migrations/001_rapidlink_sessions.sql`](supabase/migrations/001_rapidlink_sessions.sql)
 2. [`supabase/migrations/20261005120000_rapidlink_operational_backend.sql`](supabase/migrations/20261005120000_rapidlink_operational_backend.sql)
+3. [`supabase/migrations/20261027232052_phase_1_identity_notifications_readiness.sql`](supabase/migrations/20261027232052_phase_1_identity_notifications_readiness.sql)
 
-The second migration adds the operational Postgres/PostGIS model, private profile/PIN records, immutable action history, incident events, responder offers, assignments and the SMS outbox. It also removes direct anonymous reads from the room table; browser reads and writes now pass through the server API.
+The Phase 1 migration adds authenticated staff membership, one-time invitations, push subscriptions, responder readiness, handover records, notification delivery state and stricter service-role-only database access.
 
 Add these values to `.env.local` and the Vercel project:
 
 ```bash
 VITE_APP_URL=https://your-project.vercel.app
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=your-browser-safe-publishable-key
+VITE_VAPID_PUBLIC_KEY=your-vapid-public-key
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SECRET_KEY=your-secret-key
 CRON_SECRET=a-long-random-server-secret
+RAPIDLINK_BOOTSTRAP_SECRET=a-separate-long-random-secret
+VAPID_PUBLIC_KEY=your-vapid-public-key
+VAPID_PRIVATE_KEY=your-vapid-private-key
+VAPID_SUBJECT=https://your-project.vercel.app
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` is still accepted for older projects, but the current Supabase secret key is preferred. Both are server-only and must never use the `VITE_` prefix. All remote writes pass through Vercel Functions. If Supabase is unavailable or not configured, rooms fall back to local-only operation.
@@ -80,17 +91,20 @@ npx supabase db push
 - `rapidlink_employees` and `rapidlink_attendance` determine responder eligibility.
 - `rapidlink_responder_offers` enforces one offer per responder per incident.
 - `rapidlink_assignments` records the responder who won acceptance and when that responder is released.
-- `rapidlink_notification_outbox` is the integration boundary for a future SMS provider.
+- `rapidlink_staff_members` ties Supabase Auth users to a workspace, role, station and responder record.
+- `rapidlink_staff_invitations` stores hashed, single-use responder activation tokens.
+- `rapidlink_push_subscriptions` stores staff device subscriptions for standards-based Web Push.
+- `rapidlink_notification_outbox` records in-app notification delivery attempts and remains the integration boundary for a future SMS fallback.
 - `rapidlink_incident_events` provides an auditable incident timeline.
 - Client profile and cancellation-PIN material are separated from operational incident records.
 
 The action endpoint commits the room projection, normalized operational records and action log in one database transaction. Its compare-and-swap version check preserves first-accept-wins behavior when responders act concurrently.
 
-## SMS integration path
+## Staff access and notifications
 
-The `/messages` screen currently renders the SMS outbox. Each alert contains the emergency type, reference, report time, response station, coordinates with accuracy, available situation/access notes, and a responder link. Client identity and next-of-kin details remain hidden until the responder accepts.
+Create the first supervisor at `/staff/bootstrap` using the deployment-only `RAPIDLINK_BOOTSTRAP_SECRET`. The endpoint closes after the first active supervisor exists. Supervisors create 24-hour, one-time activation links for responders. Passwords are managed by Supabase Auth and are never stored in the RapidLink session state.
 
-To connect a provider later, deploy a server-side worker that claims `queued` rows from `rapidlink_notification_outbox`, sends `message_body` to `recipient_phone`, and updates `delivery_status`, `sent_at` or `last_error`. Provider credentials must remain server-side. Delivery callbacks should be authenticated and idempotent.
+Web Push uses the free browser Push API and VAPID keys. Notifications contain only a generic incident alert and a link; operational details are loaded after authenticated access. If a device has no subscription, the in-app inbox remains available. A future SMS provider can consume failed or undelivered outbox records as a fallback, but SMS is not the primary channel.
 
 The scheduled endpoint `/api/cron/escalations` processes persisted escalation deadlines. Vercel invokes it every minute as a safety worker. For the required 30-second cadence, configure Supabase Cron or another trusted scheduler to call it every 30 seconds with `Authorization: Bearer <CRON_SECRET>`. Browser recovery remains a secondary safeguard, not the only scheduler.
 
@@ -102,13 +116,13 @@ Cross-device synchronization requires connectivity. Offline demonstrations work 
 
 ## Remaining production boundaries
 
-- Profile registration is remembered only by the same browser/device store. Clearing browser data or using another device starts registration again unless a configured room is synchronized.
-- The current workspace code is a collaboration capability, not user authentication. Production requires Supabase Auth (or an equivalent identity provider), role claims and explicit RLS policies for clients, responders and supervisors.
-- PIN derivation currently starts in the browser for compatibility. Production cancellation verification and attempt throttling must move fully behind an authenticated server endpoint.
-- SMS delivery is intentionally not connected. The outbox stores messages, but a provider worker and authenticated delivery callbacks are still required.
-- The responder link is a prototype bearer link. Production links need short expiry, server-side token hashing, single-responder identity verification and revocation.
-- Release of an assigned responder must be an atomic server transition based on authenticated completion, verified handover or audited supervisor override. A timer or client inactivity must never release a responder.
-- The browser fallback is not a multi-device source of truth. Multi-device operation requires the configured API and database.
+- A client workspace token is stored only on the creating browser/device. Clearing browser data loses that client capability. Production needs verified client account recovery and explicit device management.
+- Staff access is authenticated, but the compatibility session JSON remains a broad projection. A later backend hardening phase should replace projection mutation with narrow database commands and per-entity authorization.
+- Cancellation PIN verification and throttling run on the server, but this is still not a complete account-recovery system. No fake frontend-only PIN recovery is provided.
+- Browser push delivery is best-effort and platform-dependent. A production service needs monitored fallback channels and delivery escalation; real SMS incurs provider cost.
+- Vercel Hobby cron runs at one-minute granularity. The browser deadline recovery improves responsiveness, but a production 30-second SLA needs a trusted worker or scheduler.
+- Handover and supervisor override release responders atomically in the current compatibility transaction. Production should add receiving-facility identity, immutable audit retention and operational review.
+- The browser fallback is not authoritative across devices. Cross-device operation requires the configured API and database.
 
 ## Deployment
 

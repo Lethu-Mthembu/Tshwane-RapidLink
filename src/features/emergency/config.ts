@@ -25,5 +25,7 @@ export const GA_RANKUWA_COORDINATES = {
 } as const;
 
 export const ESCALATION_INTERVAL_MS = 30_000;
+export const RESPONDER_HEARTBEAT_INTERVAL_MS = 60_000;
+export const RESPONDER_HEARTBEAT_TTL_MS = 5 * 60_000;
 export const PIN_LOCKOUT_MS = 30_000;
 export const PIN_MAX_ATTEMPTS = 5;

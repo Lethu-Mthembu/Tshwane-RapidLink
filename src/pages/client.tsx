@@ -13,11 +13,9 @@ import { EMERGENCY_SERVICES, serviceLabel } from '@/features/emergency/config';
 import { useEmergency } from '@/features/emergency/emergency-context';
 import { deleteDraft, loadDraft, saveDraft } from '@/features/emergency/media-store';
 import { sessionService } from '@/features/emergency/session-service';
-import { PinRecoveryForm, recoveryDestination, type RecoveryMethod } from '@/features/profile/pin-recovery';
-import { verifyCancellationPin } from '@/features/profile/profile-service';
 import type { CapturedLocation, IncidentAttachment, IncidentDraft, ServiceType } from '@/features/emergency/types';
 
-type ClientModal = 'prompt' | 'information' | 'status' | 'accepted' | 'cancellation' | 'pin-recovery' | 'pin-recovery-sent' | 'cancellation-result' | 'escalation' | 'confirm-help' | null;
+type ClientModal = 'prompt' | 'information' | 'status' | 'accepted' | 'cancellation' | 'cancellation-result' | 'escalation' | 'confirm-help' | null;
 
 const emptyDraft: IncidentDraft = { happened: '', landmark: '', photo: null, audio: null, dirty: false };
 const LOCATION_KEY = 'rapidlink-last-location-v1';
@@ -56,7 +54,6 @@ export default function ClientPage() {
   const [checkingPin, setCheckingPin] = useState(false);
   const [lockoutSeconds, setLockoutSeconds] = useState(0);
   const [cancellationResult, setCancellationResult] = useState<'cancelled' | 'requested' | null>(null);
-  const [pinRecoverySent, setPinRecoverySent] = useState<RecoveryMethod | null>(null);
   const [searchCountdownSeconds, setSearchCountdownSeconds] = useState(0);
   const activationGuard = useRef(false);
   const initializedAssignment = useRef(false);
@@ -243,7 +240,7 @@ export default function ClientPage() {
     if (!activeIncident || cancellationPin.length !== 6 || lockoutSeconds > 0 || checkingPin) return;
     setCheckingPin(true);
     setCancellationError('');
-    const result = await verifyCancellationPin(cancellationPin);
+    const result = await sessionService.cancelIncident(activeIncident.id, cancellationPin);
     refresh();
     setCheckingPin(false);
     if (!result.ok) {
@@ -254,7 +251,6 @@ export default function ClientPage() {
       return;
     }
     const immediatelyCancelled = ['CREATING', 'WAITING_FOR_RESPONDER', 'FAILED'].includes(activeIncident.status);
-    sessionService.cancelIncident(activeIncident.id);
     refresh();
     setCancellationPin('');
     setCancellationResult(immediatelyCancelled ? 'cancelled' : 'requested');
@@ -553,18 +549,9 @@ export default function ClientPage() {
 
       <AccessibleModal open={modal === 'cancellation'} title="Cancel emergency request?" description="Enter your six-digit cancellation PIN to confirm. Your emergency request will remain active unless the correct PIN is entered." onClose={closeModal}>
         <label className="block font-bold text-slate-800">Six-digit cancellation PIN<input autoFocus className="mt-2 h-12 w-full rounded-lg border border-slate-300 px-3 text-base tracking-[0.25em] outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" type="password" inputMode="numeric" pattern="[0-9]*" maxLength={6} autoComplete="current-password" value={cancellationPin} onChange={(event) => setCancellationPin(event.target.value.replace(/\D/g, '').slice(0, 6))} disabled={lockoutSeconds > 0 || checkingPin} /></label>
-        <button type="button" className="mt-3 text-sm font-bold text-[#003172] hover:underline focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-100" onClick={() => { setPinRecoverySent(null); setModal('pin-recovery'); }}>Forgot PIN?</button>
         {lockoutSeconds > 0 && <p className="mt-3 font-semibold text-red-700" role="status">Too many incorrect attempts. Try again in {lockoutSeconds} seconds. The emergency remains active.</p>}
         {cancellationError && <p className="mt-3 font-semibold text-red-700" role="alert">{cancellationError}</p>}
         <div className="mt-6 grid gap-3 sm:grid-cols-2"><Button variant="outline" className="min-h-12" onClick={closeModal}>Keep request active</Button><Button variant="emergency" className="min-h-12" onClick={() => void confirmCancellation()} disabled={cancellationPin.length !== 6 || lockoutSeconds > 0 || checkingPin}>{checkingPin ? 'Checking PIN…' : 'Confirm cancellation'}</Button></div>
-      </AccessibleModal>
-
-      <AccessibleModal open={modal === 'pin-recovery'} title="Reset cancellation PIN" description="Choose where to receive reset instructions. Your emergency request remains active." onClose={() => setModal('cancellation')}>
-        <PinRecoveryForm phone={profile.phone} email={profile.email} onSend={(method) => { setPinRecoverySent(method); setModal('pin-recovery-sent'); }} onCancel={() => setModal('cancellation')} />
-      </AccessibleModal>
-
-      <AccessibleModal open={modal === 'pin-recovery-sent'} title={pinRecoverySent === 'email' ? 'Check your email' : 'Check your messages'} description="Your emergency request remains active." onClose={() => setModal('cancellation')}>
-        {pinRecoverySent && <div><div className="flex items-start gap-3 rounded-xl bg-emerald-50 p-4 text-emerald-950"><CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" /><p className="font-bold">Reset instructions were sent to {recoveryDestination(pinRecoverySent, profile.phone, profile.email)}.</p></div><Button className="mt-5 min-h-12 w-full" onClick={() => setModal('cancellation')}>Back to PIN</Button></div>}
       </AccessibleModal>
 
       <AccessibleModal open={modal === 'cancellation-result'} title={cancellationResult === 'cancelled' ? 'Emergency request cancelled' : 'Cancellation sent'} onClose={closeModal}>

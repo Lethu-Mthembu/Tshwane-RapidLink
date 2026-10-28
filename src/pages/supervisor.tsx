@@ -1,35 +1,41 @@
-import { BarChart3, CalendarCheck, Pencil, Plus, Search, ShieldCheck, UserRound, UserX } from 'lucide-react';
+import { BarChart3, CalendarCheck, Copy, KeyRound, Pencil, Plus, Search, ShieldCheck, UserRound, UserX } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { AccessibleModal } from '@/components/accessible-modal';
 import { Button } from '@/components/ui/button';
+import { useStaffAuth } from '@/features/auth/staff-auth-context';
 import { EmployeeForm } from '@/features/emergency/components/employee-form';
 import { serviceLabel } from '@/features/emergency/config';
 import { useEmergency } from '@/features/emergency/emergency-context';
-import { employeeBusy, employeeDuty, sessionService } from '@/features/emergency/session-service';
+import { employeeBusy, employeeDuty, employeeReachable, sessionService } from '@/features/emergency/session-service';
 import type { Employee, ServiceType } from '@/features/emergency/types';
-
-const SUPERVISOR_STATION_ID = 'station-garankuwa';
 
 function availability(state: Parameters<typeof employeeDuty>[0], employeeId: string) {
   const employee = state.employees.find((item) => item.id === employeeId);
   const onDuty = employeeDuty(state, employeeId);
   const busy = employeeBusy(state, employeeId);
+  const reachable = employee ? employeeReachable(employee) : false;
   return {
     onDuty,
     busy,
-    label: !employee?.active ? 'Disabled' : !onDuty ? 'Off duty' : busy ? 'Responding' : 'Available',
-    classes: !employee?.active || !onDuty ? 'bg-slate-100 text-slate-700' : busy ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900',
+    label: !employee?.active ? 'Disabled' : !employee.accessEnabled ? 'Access required' : !onDuty ? 'Off duty' : !reachable ? 'Unavailable' : busy ? 'Responding' : 'Available',
+    classes: !employee?.active || !onDuty || !reachable ? 'bg-slate-100 text-slate-700' : busy ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900',
   };
 }
 
 export default function SupervisorPage() {
-  const { state, online, refresh } = useEmergency();
-  const station = state.stations.find((item) => item.id === SUPERVISOR_STATION_ID)!;
+  const { state, online, refresh, sessionCode } = useEmergency();
+  const { session, identity } = useStaffAuth();
+  const station = state.stations.find((item) => item.id === identity?.stationId)!;
   const [query, setQuery] = useState('');
   const [service, setService] = useState<ServiceType | 'all'>('all');
   const [editing, setEditing] = useState<Employee | 'new' | null>(null);
+  const [accessEmployee, setAccessEmployee] = useState<Employee | null>(null);
+  const [accessEmail, setAccessEmail] = useState('');
+  const [activationUrl, setActivationUrl] = useState('');
+  const [accessError, setAccessError] = useState('');
+  const [creatingAccess, setCreatingAccess] = useState(false);
   const stationEmployees = useMemo(
     () => state.employees.filter((employee) => employee.stationId === station.id),
     [state.employees, station.id],
@@ -43,13 +49,35 @@ export default function SupervisorPage() {
     [query, service, stationEmployees],
   );
   const onDutyCount = stationEmployees.filter((employee) => employee.active && employeeDuty(state, employee.id)).length;
-  const availableCount = stationEmployees.filter((employee) => employee.active && employeeDuty(state, employee.id) && !employeeBusy(state, employee.id)).length;
+  const availableCount = stationEmployees.filter((employee) => employee.active && employeeDuty(state, employee.id) && employeeReachable(employee) && !employeeBusy(state, employee.id)).length;
 
   const save = (employee: Omit<Employee, 'id'> | Employee) => {
     if ('id' in employee) sessionService.updateEmployee(employee);
     else sessionService.addEmployee(employee);
     refresh();
     setEditing(null);
+  };
+
+  const openAccess = (employee: Employee) => {
+    setAccessEmployee(employee);
+    setAccessEmail(employee.workEmail ?? '');
+    setActivationUrl('');
+    setAccessError('');
+  };
+
+  const createAccess = async () => {
+    if (!accessEmployee || !sessionCode || !session || !accessEmail.trim()) return;
+    setCreatingAccess(true);
+    setAccessError('');
+    const response = await fetch('/api/staff/invitations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ code: sessionCode, employeeId: accessEmployee.id, email: accessEmail.trim() }),
+    }).catch(() => null);
+    const body = response ? await response.json() as { activationUrl?: string; message?: string } : null;
+    if (!response?.ok || !body?.activationUrl) setAccessError(body?.message ?? 'The access link could not be created.');
+    else setActivationUrl(body.activationUrl);
+    setCreatingAccess(false);
   };
 
   return (
@@ -98,7 +126,7 @@ export default function SupervisorPage() {
                     <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wide ${status.classes}`}>{status.label}</span>
                   </div>
                   <a href={`tel:${employee.phone.replace(/\s/g, '')}`} className="mt-4 inline-block text-sm font-semibold text-[#003172] hover:underline">{employee.phone}</a>
-                  <Button variant="outline" className="mt-3 min-h-11 w-full" onClick={() => setEditing(employee)}><Pencil className="h-4 w-4" /> Edit responder</Button>
+                  <div className="mt-3 grid grid-cols-2 gap-2"><Button variant="outline" className="min-h-11" onClick={() => setEditing(employee)}><Pencil className="h-4 w-4" /> Edit</Button><Button variant="outline" className="min-h-11" onClick={() => openAccess(employee)}><KeyRound className="h-4 w-4" /> Access</Button></div>
                 </article>
               );
             })}
@@ -110,7 +138,7 @@ export default function SupervisorPage() {
               <tbody className="divide-y divide-slate-100">
                 {employees.map((employee) => {
                   const status = availability(state, employee.id);
-                  return <tr key={employee.id} className="align-middle"><td className="px-4 py-4"><p className="font-extrabold text-slate-950">{employee.name} {employee.surname}</p><p className="mt-0.5 text-xs font-semibold text-slate-500">{employee.employeeNumber}</p></td><td className="px-4 py-4 font-bold text-slate-700">{serviceLabel(employee.service)}</td><td className="px-4 py-4"><a href={`tel:${employee.phone.replace(/\s/g, '')}`} className="font-semibold text-[#003172] hover:underline">{employee.phone}</a></td><td className="px-4 py-4"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${status.classes}`}>{status.label}</span></td><td className="px-4 py-4 text-right"><Button size="sm" variant="outline" onClick={() => setEditing(employee)}><Pencil className="h-4 w-4" /> Edit</Button></td></tr>;
+                  return <tr key={employee.id} className="align-middle"><td className="px-4 py-4"><p className="font-extrabold text-slate-950">{employee.name} {employee.surname}</p><p className="mt-0.5 text-xs font-semibold text-slate-500">{employee.employeeNumber}</p></td><td className="px-4 py-4 font-bold text-slate-700">{serviceLabel(employee.service)}</td><td className="px-4 py-4"><a href={`tel:${employee.phone.replace(/\s/g, '')}`} className="font-semibold text-[#003172] hover:underline">{employee.phone}</a></td><td className="px-4 py-4"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${status.classes}`}>{status.label}</span></td><td className="px-4 py-4 text-right"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => openAccess(employee)}><KeyRound className="h-4 w-4" /> Access</Button><Button size="sm" variant="outline" onClick={() => setEditing(employee)}><Pencil className="h-4 w-4" /> Edit</Button></div></td></tr>;
                 })}
               </tbody>
             </table>
@@ -122,6 +150,12 @@ export default function SupervisorPage() {
 
       <AccessibleModal open={editing !== null} title={editing === 'new' ? 'Add responder' : 'Edit responder'} description={editing === 'new' ? 'Add a responder to this station.' : 'Update contact details, service or request access.'} onClose={() => setEditing(null)}>
         {editing && <EmployeeForm station={station} employee={editing === 'new' ? undefined : editing} serviceLocked={editing !== 'new' && employeeBusy(state, editing.id)} onSave={save} onCancel={() => setEditing(null)} />}
+      </AccessibleModal>
+      <AccessibleModal open={accessEmployee !== null} title="Responder app access" description="Create a one-time activation link. It expires after 24 hours." onClose={() => setAccessEmployee(null)}>
+        {accessEmployee && <div>
+          <p className="font-bold text-slate-900">{accessEmployee.name} {accessEmployee.surname} · {accessEmployee.employeeNumber}</p>
+          {!activationUrl ? <div className="mt-5"><label className="text-sm font-bold text-slate-700" htmlFor="access-email">Work email</label><input id="access-email" type="email" autoComplete="email" value={accessEmail} onChange={(event) => setAccessEmail(event.target.value)} className="mt-2 h-12 w-full border border-slate-300 px-3 text-base outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" />{accessError && <p className="mt-3 bg-red-50 p-3 font-semibold text-red-900" role="alert">{accessError}</p>}<Button className="mt-4 min-h-12 w-full" onClick={() => void createAccess()} disabled={creatingAccess || !accessEmail.trim()}>{creatingAccess ? 'Creating…' : 'Create activation link'}</Button></div> : <div className="mt-5"><label className="text-sm font-bold text-slate-700" htmlFor="activation-url">Activation link</label><textarea id="activation-url" readOnly rows={4} value={activationUrl} className="mt-2 w-full border border-slate-300 p-3 text-sm" /><Button className="mt-3 min-h-12 w-full" onClick={() => void navigator.clipboard.writeText(activationUrl)}><Copy className="h-4 w-4" /> Copy link</Button><p className="mt-3 text-sm text-slate-600">Give this link directly to the responder. It can be used once.</p></div>}
+        </div>}
       </AccessibleModal>
     </main>
   );
