@@ -19,6 +19,7 @@ import SupervisorAnalyticsPage from '@/pages/supervisor-analytics';
 import StaffSignInPage from '@/pages/staff-sign-in';
 import StaffActivatePage from '@/pages/staff-activate';
 import StaffBootstrapPage from '@/pages/staff-bootstrap';
+import StaffChangePasswordPage from '@/pages/staff-change-password';
 
 function ClientOnly({ children }: { children: React.ReactNode }) {
   const { ready, state } = useEmergency();
@@ -56,6 +57,7 @@ export function App() {
           <Route path="/staff/sign-in" element={<StaffSignInPage />} />
           <Route path="/staff/activate" element={<StaffActivatePage />} />
           <Route path="/staff/bootstrap" element={<StaffBootstrapPage />} />
+          <Route path="/staff/change-password" element={<StaffOnly roles={['admin', 'supervisor', 'responder']}><StaffChangePasswordPage /></StaffOnly>} />
           <Route path="/admin" element={<StaffOnly roles={['admin']}><AdminPage /></StaffOnly>} />
           <Route path="/messages" element={<StaffOnly roles={['responder']}><MessagesPage /></StaffOnly>} />
           <Route path="/responder" element={<StaffOnly roles={['responder']}><ResponderPage /></StaffOnly>} />

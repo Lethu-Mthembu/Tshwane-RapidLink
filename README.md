@@ -27,6 +27,7 @@ npm start
 - `/staff/bootstrap` — one-time first-administrator creation
 - `/staff/sign-in` — administrator, supervisor and responder sign-in
 - `/staff/activate` — one-time staff invitation acceptance
+- `/staff/change-password` — authenticated password change requiring the current password
 - `/admin` — organisation administrator and supervisor invitations
 - `/supervisor` — the signed-in supervisor's station/service responder directory
 - `/supervisor/attendance` — station/service attendance and shifts

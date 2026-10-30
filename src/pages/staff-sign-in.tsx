@@ -1,6 +1,6 @@
 import { LockKeyhole, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
 import { useStaffAuth } from '@/features/auth/staff-auth-context';
@@ -10,6 +10,7 @@ import { signInStaff } from '@/lib/staff-auth';
 export default function StaffSignInPage() {
   const { configured, identity, refreshIdentity } = useStaffAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -41,6 +42,7 @@ export default function StaffSignInPage() {
         <h1 className="mt-5 text-2xl font-black text-[#003172]">Staff sign in</h1>
         <p className="mt-2 text-base leading-6 text-slate-600">Responder and supervisor access is tied to an approved staff account.</p>
         {!configured && <p className="mt-4 bg-amber-50 p-3 font-semibold text-amber-950" role="alert">Staff authentication has not been configured for this deployment.</p>}
+        {searchParams.get('passwordChanged') === '1' && <p className="mt-4 bg-emerald-50 p-3 font-semibold text-emerald-950" role="status">Password changed. Sign in with your new password.</p>}
         <form className="mt-6 space-y-4" onSubmit={(event) => void submit(event)}>
           <label className="block text-sm font-bold text-slate-700">Work email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" className="mt-2 h-12 w-full border border-slate-300 px-3 text-base outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" required /></label>
           <label className="block text-sm font-bold text-slate-700">Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" minLength={10} className="mt-2 h-12 w-full border border-slate-300 px-3 text-base outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" required /></label>

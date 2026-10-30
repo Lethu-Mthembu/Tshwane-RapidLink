@@ -31,3 +31,12 @@ export async function signInStaff(email: string, password: string) {
 export async function signOutStaff() {
   if (staffAuth) await staffAuth.auth.signOut();
 }
+
+export async function changeStaffPassword(currentPassword: string, newPassword: string) {
+  if (!staffAuth) throw new Error('Staff authentication is not configured.');
+  const { error } = await staffAuth.auth.updateUser({
+    current_password: currentPassword,
+    password: newPassword,
+  });
+  if (error) throw error;
+}
