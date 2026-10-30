@@ -43,7 +43,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       if (!updated) continue;
       return response.status(200).json({ ok: true, attemptsRemaining: PIN_MAX_ATTEMPTS, record: updated });
     }
-    return response.status(409).json({ message: 'The workspace changed too quickly. Retry the PIN change.' });
+    return response.status(409).json({ message: 'Your profile changed too quickly. Retry the PIN change.' });
   } catch {
     return response.status(502).json({ message: 'The PIN could not be changed.' });
   }

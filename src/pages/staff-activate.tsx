@@ -3,11 +3,9 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
-import { normalizeRoomCode } from '@/features/emergency/session-service';
 
 export default function StaffActivatePage() {
   const [searchParams] = useSearchParams();
-  const code = normalizeRoomCode(searchParams.get('session') ?? '');
   const token = searchParams.get('token') ?? '';
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -22,7 +20,7 @@ export default function StaffActivatePage() {
     if (password !== confirm) return setError('The passwords do not match.');
     setSubmitting(true);
     const response = await fetch('/api/staff/activate', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, token, password }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password }),
     }).catch(() => null);
     const body = response ? await response.json() as { message?: string } : null;
     if (!response?.ok) setError(body?.message ?? 'Activation failed.');
@@ -40,8 +38,8 @@ export default function StaffActivatePage() {
           <label className="block text-sm font-bold text-slate-700">Password<input type="password" autoComplete="new-password" minLength={12} value={password} onChange={(event) => setPassword(event.target.value)} className="mt-2 h-12 w-full border border-slate-300 px-3 text-base outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" required /></label>
           <label className="block text-sm font-bold text-slate-700">Confirm password<input type="password" autoComplete="new-password" minLength={12} value={confirm} onChange={(event) => setConfirm(event.target.value)} className="mt-2 h-12 w-full border border-slate-300 px-3 text-base outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" required /></label>
           {error && <p className="bg-red-50 p-3 font-semibold text-red-900" role="alert">{error}</p>}
-          <Button className="min-h-12 w-full" disabled={submitting || code.length !== 6 || !token}><KeyRound className="h-4 w-4" /> {submitting ? 'Activating…' : 'Activate account'}</Button>
-        </form> : <div className="mt-6 bg-emerald-50 p-4 text-emerald-950" role="status"><p className="font-bold">{message}</p><Button asChild className="mt-4 w-full"><Link to={`/staff/sign-in?session=${encodeURIComponent(code)}`}>Continue to sign in</Link></Button></div>}
+          <Button className="min-h-12 w-full" disabled={submitting || !token}><KeyRound className="h-4 w-4" /> {submitting ? 'Activating…' : 'Activate account'}</Button>
+        </form> : <div className="mt-6 bg-emerald-50 p-4 text-emerald-950" role="status"><p className="font-bold">{message}</p><Button asChild className="mt-4 w-full"><Link to="/staff/sign-in">Continue to sign in</Link></Button></div>}
       </section>
     </main>
   );

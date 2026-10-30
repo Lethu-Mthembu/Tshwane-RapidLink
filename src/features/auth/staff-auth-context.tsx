@@ -1,7 +1,6 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 
-import { getActiveSessionCode } from '@/features/emergency/session-service';
 import type { StaffIdentity, StaffRole } from '@/features/emergency/types';
 import { currentStaffSession, signOutStaff, staffAuth, staffAuthConfigured } from '@/lib/staff-auth';
 
@@ -24,12 +23,11 @@ export function StaffAuthProvider({ children }: { children: ReactNode }) {
   const refreshIdentity = useCallback(async () => {
     const current = await currentStaffSession();
     setSession(current);
-    const code = getActiveSessionCode();
-    if (!current || !code) {
+    if (!current) {
       setIdentity(null);
       return null;
     }
-    const response = await fetch(`/api/sessions/${code}`, {
+    const response = await fetch('/api/staff/me', {
       headers: { authorization: `Bearer ${current.access_token}` },
       cache: 'no-store',
     });

@@ -1,35 +1,32 @@
 import { LockKeyhole, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
-import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
 import { useStaffAuth } from '@/features/auth/staff-auth-context';
-import { joinSession, normalizeRoomCode } from '@/features/emergency/session-service';
+import type { StaffRole } from '@/features/emergency/types';
 import { signInStaff } from '@/lib/staff-auth';
 
 export default function StaffSignInPage() {
   const { configured, identity, refreshIdentity } = useStaffAuth();
-  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [code, setCode] = useState(normalizeRoomCode(searchParams.get('session') ?? ''));
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  if (identity) return <Navigate to={identity.role === 'supervisor' ? '/supervisor' : '/messages'} replace />;
+  const destination = (role: StaffRole) => role === 'admin' ? '/admin' : role === 'supervisor' ? '/supervisor' : '/messages';
+  if (identity) return <Navigate to={destination(identity.role)} replace />;
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError('');
-    if (normalizeRoomCode(code).length !== 6) return setError('Enter the six-character station workspace code.');
     setSubmitting(true);
     try {
       await signInStaff(email.trim(), password);
-      await joinSession(code);
       const staff = await refreshIdentity();
-      if (!staff) throw new Error('This account has no access to that station workspace.');
-      navigate(staff.role === 'supervisor' ? '/supervisor' : '/messages', { replace: true });
+      if (!staff) throw new Error('This account is not active in the RapidLink staff directory.');
+      navigate(destination(staff.role), { replace: true });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Sign-in failed.');
     } finally {
@@ -45,7 +42,6 @@ export default function StaffSignInPage() {
         <p className="mt-2 text-base leading-6 text-slate-600">Responder and supervisor access is tied to an approved staff account.</p>
         {!configured && <p className="mt-4 bg-amber-50 p-3 font-semibold text-amber-950" role="alert">Staff authentication has not been configured for this deployment.</p>}
         <form className="mt-6 space-y-4" onSubmit={(event) => void submit(event)}>
-          <label className="block text-sm font-bold text-slate-700">Workspace code<input value={code} onChange={(event) => setCode(normalizeRoomCode(event.target.value))} autoCapitalize="characters" autoComplete="off" className="mt-2 h-12 w-full border border-slate-300 px-3 text-base uppercase outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" required /></label>
           <label className="block text-sm font-bold text-slate-700">Work email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" className="mt-2 h-12 w-full border border-slate-300 px-3 text-base outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" required /></label>
           <label className="block text-sm font-bold text-slate-700">Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" minLength={10} className="mt-2 h-12 w-full border border-slate-300 px-3 text-base outline-none focus:border-[#003172] focus:ring-4 focus:ring-blue-100" required /></label>
           {error && <p className="bg-red-50 p-3 font-semibold text-red-900" role="alert">{error}</p>}

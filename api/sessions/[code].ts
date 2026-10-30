@@ -11,7 +11,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const record = await getSession(code);
     if (!record) return response.status(404).json({ message: 'Room not found.' });
     if (await verifyClientAccess(record.id, clientAccessToken(request))) return response.status(200).json(record);
-    const identity = await staffIdentity(request, record.id, record.code);
+    const identity = await staffIdentity(request);
     if (!identity) return response.status(401).json({ message: 'Authentication is required.' });
     return response.status(200).json({ ...record, state: redactStateForStaff(record.state, identity), staff: identity });
   } catch {

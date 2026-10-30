@@ -32,6 +32,12 @@ export default function ClientPage() {
   const activeIncident = profile ? state.incidents.find(
     (incident) => incident.clientId === profile.id && !['completed', 'cancelled'].includes(incident.progress),
   ) : undefined;
+  const sosDispatches = activeIncident?.service === 'sos' && !activeIncident.parentIncidentId
+    ? state.incidents.filter((incident) => incident.parentIncidentId === activeIncident.id)
+    : [];
+  const assignmentSignal = activeIncident?.service === 'sos'
+    ? sosDispatches.filter((incident) => incident.assignedEmployeeId).map((incident) => incident.assignedEmployeeId).sort().join('|') || undefined
+    : activeIncident?.assignedEmployeeId;
   const lastClosedIncident = profile && !activeIncident ? state.incidents.filter((incident) => incident.clientId === profile.id && ['completed', 'cancelled'].includes(incident.progress)).at(-1) : undefined;
   const completedIncident = lastClosedIncident?.progress === 'completed' ? lastClosedIncident : undefined;
   const cancelledIncident = lastClosedIncident?.progress === 'cancelled' ? lastClosedIncident : undefined;
@@ -88,7 +94,7 @@ export default function ClientPage() {
 
   useEffect(() => {
     if (!ready) return;
-    const current = activeIncident?.assignedEmployeeId;
+    const current = assignmentSignal;
     if (!initializedAssignment.current) {
       previousAssignment.current = current;
       initializedAssignment.current = true;
@@ -99,7 +105,7 @@ export default function ClientPage() {
       else setModal('accepted');
     }
     previousAssignment.current = current;
-  }, [activeIncident?.assignedEmployeeId, modal, ready]);
+  }, [assignmentSignal, modal, ready]);
 
   useEffect(() => {
     if (!activeIncidentId) return;
@@ -322,6 +328,7 @@ export default function ClientPage() {
             />
           </div>
         )}
+        {sosDispatches.length > 0 && <section className="mb-5 grid gap-3 sm:grid-cols-2" aria-label="SOS dispatch status">{sosDispatches.map((dispatch) => { const dispatchResponder = state.employees.find((employee) => employee.id === dispatch.assignedEmployeeId); const dispatchStation = state.stations.find((item) => item.id === (dispatchResponder?.stationId ?? dispatch.stationId)); return <article key={dispatch.id} className="bg-white p-4 shadow-[0_8px_24px_rgba(15,23,42,0.08)]"><p className="text-sm font-black capitalize text-[#003172]">{dispatch.service} dispatch</p><p className="mt-1 text-xs font-semibold text-slate-500">{dispatch.reference}</p><p className="mt-3 font-bold text-slate-900">{dispatch.status === 'WAITING_FOR_RESPONDER' ? 'Waiting for a responder' : dispatch.status === 'ACCEPTED' ? 'Responder accepted' : dispatch.status === 'EN_ROUTE' ? 'Responder en route' : dispatch.status === 'ARRIVED' ? 'Responder arrived' : dispatch.status === 'CANCELLATION_REQUESTED' ? 'Cancellation sent' : dispatch.status === 'CANCELLED' ? 'Cancelled' : dispatch.status === 'COMPLETED' ? 'Completed' : 'Sending request'}</p><p className="mt-1 text-sm text-slate-600">{dispatchResponder ? `${dispatchResponder.name} ${dispatchResponder.surname}` : dispatchStation?.name ?? 'Selecting an appropriate station'}</p></article>; })}</section>}
 
         <section className="relative rounded-3xl bg-white px-4 py-7 text-center shadow-[0_16px_40px_rgba(15,23,42,0.08)] sm:px-6 sm:py-9" aria-labelledby="emergency-actions-heading">
           <h1 id="emergency-actions-heading" className="sr-only">Request emergency help</h1>
@@ -520,7 +527,7 @@ export default function ClientPage() {
       </AccessibleModal>
 
       <AccessibleModal open={modal === 'accepted'} title="Help is on the way" onClose={closeModal}>
-        {responder && station && activeIncident && (
+        {activeIncident?.service === 'sos' ? <div><div className="flex items-start gap-3 bg-emerald-50 p-4 text-emerald-950"><CheckCircle2 className="h-6 w-6 shrink-0" /><p className="font-bold leading-6">A responder has accepted one of your SOS dispatches. Police and ambulance responses remain independently tracked.</p></div><div className="mt-4 space-y-3">{sosDispatches.map((dispatch) => { const employee = state.employees.find((item) => item.id === dispatch.assignedEmployeeId); const responseStation = state.stations.find((item) => item.id === (employee?.stationId ?? dispatch.stationId)); return <div key={dispatch.id} className="bg-slate-50 p-3"><p className="font-black capitalize text-[#003172]">{dispatch.service}</p><p className="mt-1 text-sm font-semibold">{employee ? `${employee.name} ${employee.surname} · ${responseStation?.name ?? 'Assigned station'}` : 'Waiting for a responder'}</p></div>; })}</div><Button className="mt-5 w-full" onClick={closeModal}>View response status</Button></div> : responder && station && activeIncident && (
           <div>
             <div className="flex items-start gap-3 bg-emerald-50 p-4 text-emerald-950"><CheckCircle2 className="h-6 w-6 shrink-0" /><p className="font-bold leading-6">{responder.name} {responder.surname} from {station.name} has accepted your emergency request.</p></div>
             <dl className="mt-5 grid gap-3 text-sm">

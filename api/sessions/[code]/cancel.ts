@@ -54,7 +54,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       if (!updated) continue;
       return response.status(200).json({ ok: true, attemptsRemaining: PIN_MAX_ATTEMPTS, record: updated });
     }
-    return response.status(409).json({ message: 'The workspace changed too quickly. Retry the cancellation.' });
+    return response.status(409).json({ message: 'The emergency request changed too quickly. Retry the cancellation.' });
   } catch {
     return response.status(502).json({ message: 'Cancellation could not be verified.' });
   }

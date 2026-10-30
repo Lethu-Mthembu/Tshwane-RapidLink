@@ -312,7 +312,33 @@ const expandSearchImmediately = (state: EmergencyState, incidentId: string): Eme
 
 export function applyEmergencyAction(current: EmergencyState, event: EmergencyAction): EmergencyState {
   if (current.appliedActionIds.includes(event.id)) return current;
-  const remember = (state: EmergencyState): EmergencyState => ({ ...state, revision: current.revision + 1, appliedActionIds: [...current.appliedActionIds.slice(-99), event.id] });
+  const syncDispatchParents = (state: EmergencyState): EmergencyState => ({
+    ...state,
+    incidents: state.incidents.map((incident) => {
+      if (incident.service !== 'sos' || incident.parentIncidentId) return incident;
+      const children = state.incidents.filter((child) => child.parentIncidentId === incident.id);
+      if (!children.length) return incident;
+      const terminal = children.every((child) => ['CANCELLED', 'COMPLETED'].includes(child.status));
+      const allCancelled = children.every((child) => child.status === 'CANCELLED');
+      const cancellationRequested = children.some((child) => child.status === 'CANCELLATION_REQUESTED');
+      const waiting = children.some((child) => ['CREATING', 'WAITING_FOR_RESPONDER', 'FAILED'].includes(child.status));
+      const mostAdvanced = children.some((child) => child.status === 'ARRIVED') ? 'ARRIVED'
+        : children.some((child) => child.status === 'EN_ROUTE') ? 'EN_ROUTE'
+          : children.some((child) => child.status === 'ACCEPTED') ? 'ACCEPTED' : 'WAITING_FOR_RESPONDER';
+      const status = terminal ? (allCancelled ? 'CANCELLED' : 'COMPLETED') : cancellationRequested ? 'CANCELLATION_REQUESTED' : waiting ? 'WAITING_FOR_RESPONDER' : mostAdvanced;
+      const progress = status === 'COMPLETED' ? 'completed' : status === 'CANCELLED' ? 'cancelled' : status === 'CANCELLATION_REQUESTED' ? 'cancellation_requested' : status === 'ARRIVED' ? 'arrived' : status === 'EN_ROUTE' ? 'en_route' : status === 'ACCEPTED' ? 'accepted' : 'waiting';
+      return {
+        ...incident,
+        status,
+        progress,
+        deliveryState: children.every((child) => child.deliveryState === 'failed') ? 'failed' : children.some((child) => ['sent', 'delivered'].includes(child.deliveryState)) ? 'sent' : incident.deliveryState,
+        submittedAt: incident.submittedAt ?? children.find((child) => child.submittedAt)?.submittedAt,
+        completionRequestStatus: children.some((child) => child.completionRequestStatus === 'pending') ? 'pending' : incident.completionRequestStatus,
+        completedAt: terminal ? incident.completedAt ?? now() : incident.completedAt,
+      } as Incident;
+    }),
+  });
+  const remember = (state: EmergencyState): EmergencyState => ({ ...syncDispatchParents(state), revision: current.revision + 1, appliedActionIds: [...current.appliedActionIds.slice(-99), event.id] });
   if (event.type === 'reset-session') return remember(createInitialState());
   if (event.type === 'save-profile') return remember({ ...current, profile: event.payload.profile, profileSecurity: event.payload.security, registrationStatus: 'REGISTERED' });
   if (event.type === 'update-profile') return remember({ ...current, profile: event.payload.profile, registrationStatus: 'REGISTERED' });
@@ -336,11 +362,30 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
       createdAt: now(), deliveryState: 'pending', progress: 'submitting', status: 'CREATING', location: event.payload.location,
       information: [], declinedEmployeeIds: [], notifiedStationIds: [], searchStage: 0, escalationStatus: 'INITIAL_STATION',
     };
-    return remember({ ...current, incidents: [...current.incidents, incident], audit: [...current.audit, { id: generatedId('audit'), type: 'incident-created', message: `${incident.reference} created`, createdAt: now() }] });
+    if (event.payload.service !== 'sos') return remember({ ...current, incidents: [...current.incidents, incident], audit: [...current.audit, { id: generatedId('audit'), type: 'incident-created', message: `${incident.reference} created`, createdAt: now() }] });
+    const children = (['police', 'ambulance'] as const).map((service) => ({
+      ...incident,
+      id: `${incident.id}-${service}`,
+      reference: `${incident.reference}-${service === 'police' ? 'P' : 'A'}`,
+      service,
+      dispatchGroupId: incident.id,
+      parentIncidentId: incident.id,
+      dispatchKind: service,
+    }));
+    return remember({ ...current, incidents: [...current.incidents, { ...incident, dispatchGroupId: incident.id }, ...children], audit: [...current.audit, { id: generatedId('audit'), type: 'incident-created', message: `${incident.reference} created as separate police and ambulance dispatches`, createdAt: now() }] });
   }
   if (event.type === 'submit-incident') {
     const incident = current.incidents.find((item) => item.id === event.payload.incidentId);
     if (!incident || incident.deliveryState === 'sent') return remember(current);
+    if (incident.service === 'sos' && !incident.parentIncidentId) {
+      let updated = current;
+      const children = current.incidents.filter((item) => item.parentIncidentId === incident.id);
+      for (const child of children) {
+        const initiallyRouted = routeIncident(updated, child);
+        updated = initiallyRouted.offers.some((offer) => offer.incidentId === child.id && offer.status === 'open') ? initiallyRouted : expandSearchImmediately(initiallyRouted, child.id);
+      }
+      return remember({ ...updated, incidents: updated.incidents.map((item) => item.id === incident.id ? { ...item, submittedAt: now(), status: 'WAITING_FOR_RESPONDER', progress: 'waiting', deliveryState: 'sent' } : item), audit: [...updated.audit, { id: generatedId('audit'), type: 'submitted', message: `${incident.reference} submitted as two independent dispatches`, createdAt: now() }] });
+    }
     const initiallyRouted = routeIncident(current, incident);
     const routed = initiallyRouted.offers.some((offer) => offer.incidentId === incident.id && offer.status === 'open')
       ? initiallyRouted
@@ -352,8 +397,18 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
     });
   }
   if (event.type === 'update-location') {
-    const updated: EmergencyState = { ...current, incidents: current.incidents.map((incident) => incident.id === event.payload.incidentId ? { ...incident, location: event.payload.location, locationNote: event.payload.locationNote ?? incident.locationNote } : incident) };
+    const root = current.incidents.find((item) => item.id === event.payload.incidentId);
+    const targetIds = new Set(root?.service === 'sos' && !root.parentIncidentId ? [root.id, ...current.incidents.filter((item) => item.parentIncidentId === root.id).map((item) => item.id)] : [event.payload.incidentId]);
+    const updated: EmergencyState = { ...current, incidents: current.incidents.map((incident) => targetIds.has(incident.id) ? { ...incident, location: event.payload.location, locationNote: event.payload.locationNote ?? incident.locationNote } : incident) };
     const incident = updated.incidents.find((item) => item.id === event.payload.incidentId);
+    if (incident?.service === 'sos' && !incident.parentIncidentId) {
+      let routed = updated;
+      for (const child of updated.incidents.filter((item) => item.parentIncidentId === incident.id)) {
+        const next = child.deliveryState === 'pending' && !child.stationId ? routeIncident(routed, child) : routed;
+        routed = next.offers.some((offer) => offer.incidentId === child.id && offer.status === 'open') ? next : expandSearchImmediately(next, child.id);
+      }
+      return remember(routed);
+    }
     const initiallyRouted = incident?.deliveryState === 'pending' && !incident.stationId ? routeIncident(updated, incident) : updated;
     const routed = incident && !initiallyRouted.offers.some((offer) => offer.incidentId === incident.id && offer.status === 'open')
       ? expandSearchImmediately(initiallyRouted, incident.id)
@@ -365,9 +420,10 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
     const incident = current.incidents.find((item) => item.id === event.payload.incidentId);
     if (!incident) return remember(current);
     const createdAt = now();
+    const targetIds = new Set(incident.service === 'sos' && !incident.parentIncidentId ? [incident.id, ...current.incidents.filter((item) => item.parentIncidentId === incident.id).map((item) => item.id)] : [incident.id]);
     const updated = {
       ...current,
-      incidents: current.incidents.map((item) => item.id === incident.id ? { ...item, informationError: undefined, locationNote: event.payload.landmark || item.locationNote, information: [...item.information, { id: generatedId('information'), incidentId: item.id, happened: event.payload.happened, landmark: event.payload.landmark, attachments: event.payload.attachments, createdAt }] } : item),
+      incidents: current.incidents.map((item) => targetIds.has(item.id) ? { ...item, informationError: undefined, locationNote: event.payload.landmark || item.locationNote, information: [...item.information, { id: generatedId('information'), incidentId: item.id, happened: event.payload.happened, landmark: event.payload.landmark, attachments: event.payload.attachments, createdAt }] } : item),
       audit: [...current.audit, { id: generatedId('audit'), type: 'information-added', message: `${incident.reference} additional information recorded`, createdAt }],
     };
     const updatedIncident = updated.incidents.find((item) => item.id === incident.id);
@@ -519,6 +575,16 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
   if (event.type === 'cancel-incident') {
     const incident = current.incidents.find((item) => item.id === event.payload.incidentId);
     if (!incident || ['CANCELLED', 'COMPLETED'].includes(incident.status)) return remember(current);
+    if (incident.service === 'sos' && !incident.parentIncidentId) {
+      const affectedIds = new Set([incident.id, ...current.incidents.filter((item) => item.parentIncidentId === incident.id).map((item) => item.id)]);
+      const requestedAt = now();
+      const incidents = current.incidents.map((item) => {
+        if (!affectedIds.has(item.id) || ['CANCELLED', 'COMPLETED'].includes(item.status)) return item;
+        if (['WAITING_FOR_RESPONDER', 'CREATING', 'FAILED'].includes(item.status)) return { ...item, status: 'CANCELLED' as const, progress: 'cancelled' as const, cancelledAt: requestedAt, lastUpdatedAt: requestedAt, escalationStatus: 'STOPPED' as const, nextEscalationAt: undefined };
+        return { ...item, status: 'CANCELLATION_REQUESTED' as const, progressBeforeCancellation: item.progress, progress: 'cancellation_requested' as const, cancellationRequestedAt: requestedAt, cancellationResponse: undefined, escalationStatus: 'STOPPED' as const, nextEscalationAt: undefined };
+      });
+      return remember({ ...current, incidents, offers: current.offers.map((offer) => affectedIds.has(offer.incidentId) && offer.status === 'open' ? { ...offer, status: 'closed' } : offer), audit: [...current.audit, { id: generatedId('audit'), type: 'cancelled', message: `${incident.reference} cancellation applied to both dispatches`, createdAt: requestedAt }] });
+    }
     if (incident.status === 'WAITING_FOR_RESPONDER' || incident.status === 'CREATING' || incident.status === 'FAILED') {
       const cancelledAt = now();
       return remember({
@@ -569,7 +635,19 @@ export function applyEmergencyAction(current: EmergencyState, event: EmergencyAc
   }
   if (event.type === 'confirm-help-received') {
     const incident = current.incidents.find((item) => item.id === event.payload.incidentId);
-    if (!incident || incident.completionRequestStatus !== 'pending') return remember(current);
+    if (!incident) return remember(current);
+    if (incident.service === 'sos' && !incident.parentIncidentId) {
+      const childIds = new Set(current.incidents.filter((item) => item.parentIncidentId === incident.id && item.completionRequestStatus === 'pending').map((item) => item.id));
+      if (!childIds.size) return remember(current);
+      const confirmedAt = now();
+      return remember({
+        ...current,
+        incidents: current.incidents.map((item) => childIds.has(item.id) ? event.payload.received ? { ...item, status: 'COMPLETED', progress: 'completed', completionRequestStatus: 'confirmed', completionSource: 'client_confirmation', completedAt: confirmedAt, lastUpdatedAt: confirmedAt } : { ...item, completionRequestStatus: 'declined' } : item),
+        offers: current.offers.map((offer) => childIds.has(offer.incidentId) && offer.status === 'open' ? { ...offer, status: 'closed' } : offer),
+        audit: [...current.audit, { id: generatedId('audit'), type: event.payload.received ? 'completed' : 'closure-declined', message: `${incident.reference} help confirmation applied to pending dispatches`, createdAt: confirmedAt }],
+      });
+    }
+    if (incident.completionRequestStatus !== 'pending') return remember(current);
     const confirmedAt = now();
     if (!event.payload.received) {
       return remember({
@@ -795,7 +873,7 @@ export async function joinSession(code: string) {
     const identity = readDeviceIdentity();
     if (!record.state.profile && identity) commit(action('save-profile', identity));
   } else if (!storage()?.getItem(stateKey(normalized))) {
-    if (response && response.status === 404) throw new Error('That workspace could not be found.');
+    if (response && response.status === 404) throw new Error('That response link is no longer available.');
     remoteAvailable = false;
     writeLocal(normalized, createInitialState());
   }

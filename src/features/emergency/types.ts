@@ -30,7 +30,7 @@ export type EscalationStatus = 'INITIAL_STATION' | 'SEARCH_EXPANDED' | 'ALL_STAT
 export type DeliveryState = 'pending' | 'queued' | 'sent' | 'delivered' | 'failed' | 'no_station' | 'no_responders' | 'everyone_declined';
 export type AttendanceChoice = 'present' | 'absent' | 'leave';
 export type OfferStatus = 'open' | 'declined' | 'accepted' | 'closed';
-export type StaffRole = 'responder' | 'supervisor';
+export type StaffRole = 'admin' | 'responder' | 'supervisor';
 export type ResponderAvailability = 'available' | 'temporarily_unavailable';
 export type HandoverType = 'hospital' | 'police_station' | 'emergency_service' | 'authorized_person';
 
@@ -85,6 +85,9 @@ export interface Incident {
   reference: string;
   clientId: string;
   service: ServiceType;
+  dispatchGroupId?: string;
+  parentIncidentId?: string;
+  dispatchKind?: Exclude<ServiceType, 'sos'>;
   createdAt: string;
   submittedAt?: string;
   deliveryState: DeliveryState;
@@ -254,10 +257,13 @@ export type EmergencyAction =
 
 export interface StaffIdentity {
   userId: string;
-  sessionId: string;
-  sessionCode: string;
+  staffAccountId: string;
+  organisationId: string;
   role: StaffRole;
-  stationId: string;
+  stationServiceId?: string;
+  stationId?: string;
+  stationName?: string;
+  service?: Exclude<ServiceType, 'sos'>;
   employeeId?: string;
   email: string;
 }

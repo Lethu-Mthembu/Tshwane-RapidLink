@@ -1,4 +1,4 @@
-import type { EmergencyAction, EmergencyState, SessionRecord } from '../features/emergency/types.js';
+import type { AttendanceEntry, EmergencyAction, EmergencyState, Employee, SessionRecord, Station } from '../features/emergency/types.js';
 
 interface SessionRow {
   id: string;
@@ -31,6 +31,64 @@ const toRecord = (row: SessionRow): SessionRecord => ({
   expiresAt: row.expires_at,
 });
 
+interface ServiceStationRow { id: string; station_key: string; name: string; area: string; latitude: number; longitude: number; service: 'police' | 'ambulance' | 'fire' }
+interface ResponderRow { id: string; staff_account_id: string; station_service_id: string; employee_number: string; name: string; surname: string; phone: string; active: boolean; availability: Employee['availability']; availability_reason?: string; availability_updated_at?: string; last_heartbeat_at?: string; dispatch_status: 'available' | 'responding' }
+interface StaffAccountRow { id: string; email: string }
+interface AttendanceRow { id: string; responder_id: string; duty_date: string; shift_start: string; shift_end: string; choice: AttendanceEntry['choice']; ended_at?: string; updated_at: string; updated_by: string }
+
+function stripOperationalDirectory(state: EmergencyState): EmergencyState {
+  return { ...state, employees: [], attendance: [] };
+}
+
+async function hydrateOperationalDirectory(record: SessionRecord): Promise<SessionRecord> {
+  if (!supabaseConfigured) return record;
+  const [stationResponse, responderResponse, accountResponse, attendanceResponse] = await Promise.all([
+    fetch(`${url}/rest/v1/rapidlink_service_stations?active=eq.true&select=id,station_key,name,area,latitude,longitude,service`, { headers: headers(), cache: 'no-store' }),
+    fetch(`${url}/rest/v1/rapidlink_responders?active=eq.true&select=id,staff_account_id,station_service_id,employee_number,name,surname,phone,active,availability,availability_reason,availability_updated_at,last_heartbeat_at,dispatch_status`, { headers: headers(), cache: 'no-store' }),
+    fetch(`${url}/rest/v1/rapidlink_staff_accounts?active=eq.true&role=eq.responder&select=id,email`, { headers: headers(), cache: 'no-store' }),
+    fetch(`${url}/rest/v1/rapidlink_responder_attendance?select=id,responder_id,duty_date,shift_start,shift_end,choice,ended_at,updated_at,updated_by`, { headers: headers(), cache: 'no-store' }),
+  ]);
+  if (!stationResponse.ok || !responderResponse.ok || !accountResponse.ok || !attendanceResponse.ok) throw new Error('Permanent responder directory lookup failed.');
+  const stationRows = await stationResponse.json() as ServiceStationRow[];
+  const responderRows = await responderResponse.json() as ResponderRow[];
+  const accountRows = await accountResponse.json() as StaffAccountRow[];
+  const attendanceRows = await attendanceResponse.json() as AttendanceRow[];
+  const scopes = new Map(stationRows.map((station) => [station.id, station]));
+  const emails = new Map(accountRows.map((account) => [account.id, account.email]));
+  const stationGroups = new Map<string, Station>();
+  for (const row of stationRows) {
+    const existing = stationGroups.get(row.station_key);
+    if (existing) existing.services.push(row.service);
+    else stationGroups.set(row.station_key, { id: row.station_key, name: row.name, area: row.area, latitude: row.latitude, longitude: row.longitude, services: [row.service] });
+  }
+  const employees: Employee[] = responderRows.flatMap((responder) => {
+    const scope = scopes.get(responder.station_service_id);
+    if (!scope) return [];
+    return [{
+      id: responder.id,
+      employeeNumber: responder.employee_number,
+      name: responder.name,
+      surname: responder.surname,
+      phone: responder.phone,
+      service: scope.service,
+      stationId: scope.station_key,
+      active: responder.active,
+      workEmail: emails.get(responder.staff_account_id),
+      accessEnabled: true,
+      availability: responder.dispatch_status === 'responding' ? 'temporarily_unavailable' : responder.availability,
+      availabilityReason: responder.dispatch_status === 'responding' ? 'Assigned to an active response' : responder.availability_reason,
+      availabilityUpdatedAt: responder.availability_updated_at,
+      lastHeartbeatAt: responder.last_heartbeat_at,
+    }];
+  });
+  const responderIds = new Set(employees.map((employee) => employee.id));
+  const attendance: AttendanceEntry[] = attendanceRows.filter((entry) => responderIds.has(entry.responder_id)).map((entry) => ({
+    id: entry.id, employeeId: entry.responder_id, date: entry.duty_date, shiftStart: entry.shift_start, shiftEnd: entry.shift_end,
+    choice: entry.choice, endedAt: entry.ended_at, updatedAt: entry.updated_at, updatedBy: entry.updated_by,
+  }));
+  return { ...record, state: { ...record.state, stations: [...stationGroups.values()], employees, attendance } };
+}
+
 export async function getSession(code: string): Promise<SessionRecord | null> {
   if (!supabaseConfigured) return null;
   const activeAfter = encodeURIComponent(new Date().toISOString());
@@ -39,7 +97,7 @@ export async function getSession(code: string): Promise<SessionRecord | null> {
   });
   if (!response.ok) throw new Error(`Session lookup failed: ${response.status}`);
   const rows = await response.json() as SessionRow[];
-  return rows[0] ? toRecord(rows[0]) : null;
+  return rows[0] ? hydrateOperationalDirectory(toRecord(rows[0])) : null;
 }
 
 export async function purgeExpiredSessions() {
@@ -58,7 +116,7 @@ export async function upsertSession(code: string, state: EmergencyState, clientT
     headers: headers({ 'content-type': 'application/json', prefer: 'return=representation' }),
     body: JSON.stringify({
       code,
-      state,
+      state: stripOperationalDirectory(state),
       version: 0,
       updated_at: timestamp,
       expires_at: expiresAt,
@@ -67,7 +125,7 @@ export async function upsertSession(code: string, state: EmergencyState, clientT
     cache: 'no-store',
   });
   if (!response.ok) throw new Error(`Session creation failed: ${response.status}`);
-  return toRecord((await response.json() as SessionRow[])[0]);
+  return hydrateOperationalDirectory(toRecord((await response.json() as SessionRow[])[0]));
 }
 
 export async function compareAndSwapSession(record: SessionRecord, state: EmergencyState): Promise<SessionRecord | null> {
@@ -75,12 +133,12 @@ export async function compareAndSwapSession(record: SessionRecord, state: Emerge
   const response = await fetch(`${url}/rest/v1/rapidlink_sessions?code=eq.${encodeURIComponent(record.code)}&version=eq.${record.version}`, {
     method: 'PATCH',
     headers: headers({ 'content-type': 'application/json', prefer: 'return=representation' }),
-    body: JSON.stringify({ state, version: record.version + 1, updated_at: new Date().toISOString() }),
+    body: JSON.stringify({ state: stripOperationalDirectory(state), version: record.version + 1, updated_at: new Date().toISOString() }),
     cache: 'no-store',
   });
   if (!response.ok) throw new Error(`Session update failed: ${response.status}`);
   const rows = await response.json() as SessionRow[];
-  return rows[0] ? toRecord(rows[0]) : null;
+  return rows[0] ? hydrateOperationalDirectory(toRecord(rows[0])) : null;
 }
 
 export async function commitSessionAction(record: SessionRecord, state: EmergencyState, event: EmergencyAction): Promise<SessionRecord | null> {
@@ -91,7 +149,7 @@ export async function commitSessionAction(record: SessionRecord, state: Emergenc
     body: JSON.stringify({
       p_code: record.code,
       p_expected_version: record.version,
-      p_state: state,
+      p_state: stripOperationalDirectory(state),
       p_action_id: event.id,
       p_action_type: event.type,
       p_action_payload: event.payload,
@@ -100,7 +158,7 @@ export async function commitSessionAction(record: SessionRecord, state: Emergenc
   });
   if (!response.ok) throw new Error(`Session action commit failed: ${response.status}`);
   const rows = await response.json() as SessionRow[];
-  return rows[0] ? toRecord(rows[0]) : null;
+  return rows[0] ? hydrateOperationalDirectory(toRecord(rows[0])) : null;
 }
 
 export async function listDueSessions(at = new Date()): Promise<SessionRecord[]> {
@@ -120,7 +178,7 @@ export async function listDueSessions(at = new Date()): Promise<SessionRecord[]>
     { headers: headers(), cache: 'no-store' },
   );
   if (!sessionResponse.ok) throw new Error(`Due session lookup failed: ${sessionResponse.status}`);
-  return (await sessionResponse.json() as SessionRow[]).map(toRecord);
+  return Promise.all((await sessionResponse.json() as SessionRow[]).map((row) => hydrateOperationalDirectory(toRecord(row))));
 }
 
 export async function listNotificationSessions(at = new Date()): Promise<SessionRecord[]> {
@@ -136,7 +194,7 @@ export async function listNotificationSessions(at = new Date()): Promise<Session
   const filter = encodeURIComponent(`(${sessionIds.join(',')})`);
   const sessionResponse = await fetch(`${url}/rest/v1/rapidlink_sessions?id=in.${filter}&expires_at=gt.${encodeURIComponent(at.toISOString())}&select=*`, { headers: headers(), cache: 'no-store' });
   if (!sessionResponse.ok) throw new Error(`Notification session load failed: ${sessionResponse.status}`);
-  return (await sessionResponse.json() as SessionRow[]).map(toRecord);
+  return Promise.all((await sessionResponse.json() as SessionRow[]).map((row) => hydrateOperationalDirectory(toRecord(row))));
 }
 
 export async function uploadAttachment(code: string, file: { name: string; type: string; bytes: Uint8Array }) {

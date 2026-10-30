@@ -1,147 +1,143 @@
 # RapidLink
 
-RapidLink is an installable emergency-response application. A client starts a request, eligible on-duty responders receive an offer, and the first responder to accept owns the incident. A supervisor manages responder records and attendance.
+RapidLink is an installable emergency-response application with a React/Tailwind PWA and a Node/Supabase backend. Clients create emergency requests, eligible responders receive station-scoped offers, and the backend enforces first-valid-acceptance ownership and responder release.
 
-The application is a React single-page PWA built with Vite, TypeScript and Tailwind CSS. Supabase provides PostgreSQL/PostGIS persistence. The API can run as Vercel Functions or through the Node web server used by Render. The browser keeps an offline queue, but the server is authoritative whenever it is configured.
-
-## Run locally
+## Local setup
 
 Requirements: Node.js 22 and npm 11.
 
 ```bash
 npm install
-cp .env.example .env.local
+copy .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173) to enter the client flow. Use `/session` to create an operations workspace. Staff join through authenticated accounts; a workspace code alone does not grant access.
+The Vite development server starts at [http://localhost:5173](http://localhost:5173). It does not execute the server API. For a production-style local run, configure the server variables, then use:
 
-## Frontend routes
+```bash
+npm run build
+npm start
+```
 
-- `http://localhost:5173/` — redirect to client registration or the emergency page
-- `http://localhost:5173/session` — create an operations workspace and open staff onboarding links
-- `http://localhost:5173/register` — first-time client registration
-- `http://localhost:5173/client` — client emergency request and live status
-- `http://localhost:5173/client/profile` — edit client details or change the cancellation PIN
-- `http://localhost:5173/staff/sign-in` — responder and supervisor sign-in
-- `http://localhost:5173/staff/activate` — one-time responder account activation
-- `http://localhost:5173/staff/bootstrap` — one-time first-supervisor setup
-- `http://localhost:5173/supervisor` — station employee and app-access management
-- `http://localhost:5173/supervisor/attendance` — daily attendance and shifts
-- `http://localhost:5173/responder` — responder entry point
-- `http://localhost:5173/responder/offers/{offerId}` — unique responder offer
-- `http://localhost:5173/messages` — responder message inbox
+## Routes
 
-Compatibility routes `/citizen`, `/dispatcher`, `/supervisor/employees`, and `/demo/sms` redirect to their current equivalents.
+- `/register` — first-time client registration
+- `/client` — client emergency request and live response status
+- `/client/profile` — client profile and cancellation-PIN management
+- `/staff/bootstrap` — one-time first-administrator creation
+- `/staff/sign-in` — administrator, supervisor and responder sign-in
+- `/staff/activate` — one-time staff invitation acceptance
+- `/admin` — organisation administrator and supervisor invitations
+- `/supervisor` — the signed-in supervisor's station/service responder directory
+- `/supervisor/attendance` — station/service attendance and shifts
+- `/supervisor/analytics` — station/service readiness aggregates
+- `/messages` — responder offer inbox
+- `/responder/offers/:offerId` — responder offer and active-response workflow
 
-The plain Vite development server uses the local-only fallback because it does not run the API. To run the production-style Node server locally, build first and then run `npm start` with the required environment variables configured.
+There is no login route for clients and no user-created workspace/session page. The client application maintains an internal response channel for cross-device synchronization; that implementation key is not an authorization mechanism and is not shown as an operational workflow.
 
-## Response flow
+## Staff ownership and onboarding
 
-1. Open `/` and register the client once. Use `/session` first only when a shared room is needed. The browser stores only a salted PBKDF2-derived cancellation PIN hash.
-2. Open the Client interface and enable location or use the Ga-Rankuwa preset.
-3. Press SOS or choose a service. The request is transmitted immediately to the closest appropriate station.
-4. If nobody accepts after 30 seconds, the persisted scheduler notifies the next closest appropriate station. Earlier offers remain open and the first valid acceptance wins.
-5. The supervisor creates a one-time activation link for each responder. The responder signs in, marks themselves available and enables device notifications. In-app notification is the primary channel; SMS is reserved as a future fallback.
-6. The responder opens an offer, accepts it, and updates the response through En route and Arrived. The responder requests closure, but the incident closes only after the client confirms that help was received, a verified handover is recorded, or a supervisor uses an audited override.
-7. To cancel, the client enters the six-digit cancellation PIN. A waiting request is cancelled immediately; an accepted request remains active until the assigned responder acknowledges the cancellation.
+Staff ownership is permanent and backend-enforced:
 
-The Supervisor interface controls employee records and attendance. Reset room data returns the room to its initial seeded state.
+```text
+Organisation
+  -> physical station + service
+      -> supervisors
+      -> responders
+```
 
-## Cross-device rooms with Supabase
+- The first administrator is created once at `/staff/bootstrap` using `RAPIDLINK_BOOTSTRAP_SECRET`.
+- Administrators invite additional administrators or station/service-scoped supervisors.
+- Multiple supervisors may coexist in one station/service scope.
+- A supervisor can only view and invite responders in the supervisor's own station/service scope.
+- No responder placeholder is created when an invitation is issued. Invitation acceptance atomically creates the Supabase Auth user, permanent staff account and responder record.
+- Supervisor screens expose responder readiness and aggregate operational counts. They do not expose client identity, live location, incident descriptions or attachments.
 
-Create a Supabase project and apply the migrations in order:
+Invitation emails are sent through Resend from the configured `trainmate.nemasites.com` sender. If email delivery fails, the pending invitation is revoked instead of leaving a usable undistributed token.
 
-1. [`supabase/migrations/001_rapidlink_sessions.sql`](supabase/migrations/001_rapidlink_sessions.sql)
-2. [`supabase/migrations/20261005120000_rapidlink_operational_backend.sql`](supabase/migrations/20261005120000_rapidlink_operational_backend.sql)
-3. [`supabase/migrations/20261027232052_phase_1_identity_notifications_readiness.sql`](supabase/migrations/20261027232052_phase_1_identity_notifications_readiness.sql)
+## Emergency dispatch
 
-The Phase 1 migration adds authenticated staff membership, one-time invitations, push subscriptions, responder readiness, handover records, notification delivery state and stricter service-role-only database access.
+1. The registered client submits a police, ambulance, fire or SOS request.
+2. SOS creates two linked but independent dispatches: one police dispatch and one ambulance dispatch. They have separate offers, assignments, escalation and status.
+3. The nearest appropriate station receives offers for responders who are active, on duty and available.
+4. If nobody accepts by the escalation deadline, the backend expands the search to the next appropriate station. Previous offers remain active.
+5. The first valid acceptance wins. A server-side responder assignment prevents that responder from accepting another active call from any client channel.
+6. A responder is released only after a terminal cancellation/completion transition, verified handover or client confirmation that help was received.
 
-Add these values to `.env.local` and the selected deployment platform:
+## Backend model
+
+The backend code is in `/api`, `/server` and `/src/lib`:
+
+- `/api/staff` — bootstrap, sign-in identity, invitations, permanent directory and attendance operations
+- `/api/sessions` — client incident commands, cancellation and responder actions
+- `/api/cron/escalations` — persisted escalation processing
+- `/server/index.ts` — Render Node service, API routing, SPA delivery and escalation sweep
+- `/src/lib/auth-server.ts` — authenticated staff identity, authorization and global responder assignment
+- `/src/lib/supabase-server.ts` — Supabase persistence and compatibility projection hydration
+- `/src/lib/resend-server.ts` — server-only Resend email delivery
+- `/supabase/migrations` — PostgreSQL schema and data migrations
+
+The current React screens still consume a session-state projection for incident synchronization. Staff accounts, station/service ownership, attendance, push subscriptions and responder availability are permanent normalized records. Supabase service-role access bypasses RLS, so station/service ownership is enforced in both the Node authorization layer and database triggers.
+
+## Supabase migration
+
+Apply migrations in filename order. The permanent staff migration is:
+
+```text
+supabase/migrations/20261029143000_permanent_station_staff_model.sql
+```
+
+That migration deliberately removes legacy seeded responders, responder attendance, old staff memberships/invitations, offers, assignments, notification artifacts and responder data embedded in session projections. It retains station records and the client profile/incident tables. The legacy Auth user must be removed separately through Supabase Authentication because PostgreSQL migrations should not silently delete Auth identities.
+
+## Environment variables
+
+Browser-safe variables:
 
 ```bash
 VITE_APP_URL=https://your-deployment.example
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=your-browser-safe-publishable-key
 VITE_VAPID_PUBLIC_KEY=your-vapid-public-key
+```
+
+Server-only variables:
+
+```bash
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SECRET_KEY=your-secret-key
-CRON_SECRET=a-long-random-server-secret
-RAPIDLINK_BOOTSTRAP_SECRET=a-separate-long-random-secret
+RAPIDLINK_APP_URL=https://your-deployment.example
+RAPIDLINK_BOOTSTRAP_SECRET=a-long-random-one-time-bootstrap-secret
+CRON_SECRET=a-separate-long-random-secret
+RESEND_API_KEY=your-resend-api-key
+RESEND_FROM_EMAIL=RapidLink Access <access@trainmate.nemasites.com>
 VAPID_PUBLIC_KEY=your-vapid-public-key
 VAPID_PRIVATE_KEY=your-vapid-private-key
 VAPID_SUBJECT=https://your-deployment.example
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` is still accepted for older projects, but the current Supabase secret key is preferred. Both are server-only and must never use the `VITE_` prefix. All remote writes pass through the server API. If Supabase is unavailable or not configured, rooms fall back to local-only operation.
+`SUPABASE_SERVICE_ROLE_KEY` remains supported for older projects, but `SUPABASE_SECRET_KEY` is preferred. Never expose either key, `RESEND_API_KEY`, `CRON_SECRET` or `RAPIDLINK_BOOTSTRAP_SECRET` through a `VITE_` variable.
 
-Apply migrations with the Supabase CLI after linking the project:
-
-```bash
-npx supabase link --project-ref your-project-ref
-npx supabase db push
-```
-
-## Backend model
-
-- `rapidlink_sessions` remains the compatibility projection consumed by the existing React screens.
-- `rapidlink_action_log` makes client actions idempotent and records the server mutation history.
-- `rapidlink_stations` and `rapidlink_incidents` use PostGIS geography columns for future authoritative nearest-station queries.
-- `rapidlink_employees` and `rapidlink_attendance` determine responder eligibility.
-- `rapidlink_responder_offers` enforces one offer per responder per incident.
-- `rapidlink_assignments` records the responder who won acceptance and when that responder is released.
-- `rapidlink_staff_members` ties Supabase Auth users to a workspace, role, station and responder record.
-- `rapidlink_staff_invitations` stores hashed, single-use responder activation tokens.
-- `rapidlink_push_subscriptions` stores staff device subscriptions for standards-based Web Push.
-- `rapidlink_notification_outbox` records in-app notification delivery attempts and remains the integration boundary for a future SMS fallback.
-- `rapidlink_incident_events` provides an auditable incident timeline.
-- Client profile and cancellation-PIN material are separated from operational incident records.
-
-The action endpoint commits the room projection, normalized operational records and action log in one database transaction. Its compare-and-swap version check preserves first-accept-wins behavior when responders act concurrently.
-
-## Staff access and notifications
-
-Create the first supervisor at `/staff/bootstrap` using the deployment-only `RAPIDLINK_BOOTSTRAP_SECRET`. The endpoint closes after the first active supervisor exists. Supervisors create 24-hour, one-time activation links for responders. Passwords are managed by Supabase Auth and are never stored in the RapidLink session state.
-
-Web Push uses the free browser Push API and VAPID keys. Notifications contain only a generic incident alert and a link; operational details are loaded after authenticated access. If a device has no subscription, the in-app inbox remains available. A future SMS provider can consume failed or undelivered outbox records as a fallback, but SMS is not the primary channel.
-
-The scheduled endpoint `/api/cron/escalations` processes persisted escalation deadlines. The Render Node service also performs a non-overlapping sweep every 30 seconds while its process is running. A free Render service sleeps after inactivity, so production still requires an always-on worker or another trusted scheduler. Browser recovery remains a secondary safeguard, not the only scheduler.
-
-## PWA and offline behavior
-
-The Vite PWA build generates the web manifest and service worker, precaches the application shell and hashed assets, and retains the designed offline route. Open the deployed HTTPS site and choose Install when prompted. Actions are applied locally and queued in order; they synchronize when connectivity returns.
-
-Cross-device synchronization requires connectivity. Offline demonstrations work across tabs on the same installed device.
-
-## Remaining production boundaries
-
-- A client workspace token is stored only on the creating browser/device. Clearing browser data loses that client capability. Production needs verified client account recovery and explicit device management.
-- Staff access is authenticated, but the compatibility session JSON remains a broad projection. A later backend hardening phase should replace projection mutation with narrow database commands and per-entity authorization.
-- Cancellation PIN verification and throttling run on the server, but this is still not a complete account-recovery system. No fake frontend-only PIN recovery is provided.
-- Browser push delivery is best-effort and platform-dependent. A production service needs monitored fallback channels and delivery escalation; real SMS incurs provider cost.
-- The free Render web service sleeps after inactivity and can take about a minute to restart. Its in-process 30-second sweep is therefore not a production scheduling guarantee. A production 30-second SLA needs an always-on worker or scheduler.
-- Handover and supervisor override release responders atomically in the current compatibility transaction. Production should add receiving-facility identity, immutable audit retention and operational review.
-- The browser fallback is not authoritative across devices. Cross-device operation requires the configured API and database.
+The Resend domain must be verified before invitation email can be delivered. Until `RESEND_API_KEY` is configured, staff invitation creation intentionally returns `503`.
 
 ## Render deployment
 
-Deploy the repository as one Node Web Service. Do not use a Static Site: the operational `/api` routes require server-side execution.
+Deploy this repository as one Node Web Service, not as a Static Site:
 
 - Build command: `npm ci && npm run build`
 - Start command: `npm start`
 - Health check: `/healthz`
-- Runtime: Node
 - Branch: `main`
+- Runtime: Node
 
-The server binds to Render's `PORT`, serves `dist`, preserves SPA routing, exposes the existing API routes and runs the escalation sweep while the instance is awake. Configure all environment variables listed above, set `VITE_APP_URL` and `VAPID_SUBJECT` to the final Render HTTPS URL, and keep all secret values out of Git.
+The service binds to Render's `PORT`, serves the PWA, exposes `/api`, and runs a non-overlapping escalation sweep while the process is awake. A sleeping free service cannot guarantee a 30-second dispatch SLA; an always-on service or trusted scheduler is required before treating escalation timing as operationally reliable.
 
-## Vercel deployment
+## Production boundaries
 
-Import the repository into Vercel, select the Vite framework preset, add the environment variables above, and deploy. No root-directory override or separate backend deployment is required; Vercel deploys the functions in `/api` with the SPA.
-
-```bash
-npm run typecheck
-npm run build
-npm start
-```
+- Resend provides email onboarding only; real SMS delivery is not implemented.
+- Browser push is best-effort and must have monitored fallback channels for production use.
+- The compatibility incident projection should eventually be replaced with narrow per-command database procedures and immutable incident events.
+- Cancellation PIN verification belongs on the backend, but account recovery still requires verified email/phone ownership and explicit device management.
+- Internal client response channels are synchronization identifiers, not production authorization boundaries.
+- Supabase and the Render API are authoritative across devices; offline browser state alone is not.
+- The free Render tier cannot provide an emergency-grade availability or latency guarantee.

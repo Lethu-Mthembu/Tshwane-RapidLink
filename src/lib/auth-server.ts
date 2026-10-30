@@ -55,45 +55,62 @@ export async function authenticatedUser(request: ApiRequest): Promise<AuthUserRe
 }
 
 interface StaffRow {
+  id: string;
+  organisation_id: string;
   auth_user_id: string;
-  session_id: string;
   role: StaffRole;
-  station_key: string;
-  employee_key: string | null;
+  station_service_id: string | null;
   email: string;
 }
 
-export async function staffIdentity(request: ApiRequest, sessionId: string, sessionCode: string): Promise<StaffIdentity | null> {
+interface StationScopeRow { id: string; station_key: string; name: string; service: 'police' | 'ambulance' | 'fire' }
+interface ResponderRow { id: string }
+
+export async function staffIdentity(request: ApiRequest): Promise<StaffIdentity | null> {
   if (!supabaseUrl || !serviceKey) return null;
   const user = await authenticatedUser(request);
   if (!user) return null;
   const query = new URLSearchParams({
     auth_user_id: `eq.${user.id}`,
-    session_id: `eq.${sessionId}`,
     active: 'eq.true',
-    select: 'auth_user_id,session_id,role,station_key,employee_key,email',
+    select: 'id,organisation_id,auth_user_id,role,station_service_id,email',
   });
-  const response = await fetch(`${supabaseUrl}/rest/v1/rapidlink_staff_members?${query}`, {
+  const response = await fetch(`${supabaseUrl}/rest/v1/rapidlink_staff_accounts?${query}`, {
     headers: serviceHeaders(), cache: 'no-store',
   });
   if (!response.ok) return null;
   const row = (await response.json() as StaffRow[])[0];
-  return row ? {
+  if (!row) return null;
+  let scope: StationScopeRow | undefined;
+  if (row.station_service_id) {
+    const scopeResponse = await fetch(`${supabaseUrl}/rest/v1/rapidlink_service_stations?id=eq.${row.station_service_id}&select=id,station_key,name,service`, { headers: serviceHeaders(), cache: 'no-store' });
+    if (!scopeResponse.ok) return null;
+    scope = (await scopeResponse.json() as StationScopeRow[])[0];
+    if (!scope) return null;
+  }
+  let responder: ResponderRow | undefined;
+  if (row.role === 'responder') {
+    const responderResponse = await fetch(`${supabaseUrl}/rest/v1/rapidlink_responders?staff_account_id=eq.${row.id}&active=eq.true&select=id`, { headers: serviceHeaders(), cache: 'no-store' });
+    if (!responderResponse.ok) return null;
+    responder = (await responderResponse.json() as ResponderRow[])[0];
+    if (!responder) return null;
+  }
+  return {
     userId: row.auth_user_id,
-    sessionId: row.session_id,
-    sessionCode,
+    staffAccountId: row.id,
+    organisationId: row.organisation_id,
     role: row.role,
-    stationId: row.station_key,
-    employeeId: row.employee_key ?? undefined,
+    stationServiceId: scope?.id,
+    stationId: scope?.station_key,
+    stationName: scope?.name,
+    service: scope?.service,
+    employeeId: responder?.id,
     email: row.email,
-  } : null;
+  };
 }
 
 const clientActions = new Set<EmergencyAction['type']>([
   'create-incident', 'submit-incident', 'update-location', 'add-information', 'update-profile', 'confirm-help-received',
-]);
-const supervisorActions = new Set<EmergencyAction['type']>([
-  'save-attendance', 'end-shift', 'add-employee', 'update-employee', 'supervisor-close-incident', 'reset-session',
 ]);
 const responderActions = new Set<EmergencyAction['type']>([
   'decline-offer', 'accept-offer', 'update-progress', 'respond-cancellation', 'request-completion',
@@ -113,35 +130,31 @@ function responderOwnsAction(state: EmergencyState, identity: StaffIdentity, act
 export async function authorizeAction(request: ApiRequest, sessionId: string, sessionCode: string, state: EmergencyState, action: EmergencyAction) {
   if (action.type === 'save-profile' && !state.profile && await verifyClientAccess(sessionId, clientAccessToken(request))) return { kind: 'client' as const };
   if (clientActions.has(action.type) && await verifyClientAccess(sessionId, clientAccessToken(request))) return { kind: 'client' as const };
-  const identity = await staffIdentity(request, sessionId, sessionCode);
+  const identity = await staffIdentity(request);
   if (!identity) return null;
-  if (identity.role === 'supervisor' && supervisorActions.has(action.type)) return { kind: 'staff' as const, identity };
   if (identity.role === 'responder' && responderActions.has(action.type) && responderOwnsAction(state, identity, action)) return { kind: 'staff' as const, identity };
   return null;
 }
 
 export function redactStateForStaff(state: EmergencyState, identity: StaffIdentity): EmergencyState {
-  const stationEmployeeIds = new Set(state.employees.filter((employee) => employee.stationId === identity.stationId).map((employee) => employee.id));
   const employeeId = identity.employeeId;
-  const visibleOffers = identity.role === 'supervisor'
-    ? state.offers.filter((offer) => stationEmployeeIds.has(offer.employeeId))
-    : state.offers.filter((offer) => offer.employeeId === employeeId);
+  const visibleOffers = state.offers.filter((offer) => offer.employeeId === employeeId);
   const visibleIncidentIds = new Set(visibleOffers.map((offer) => offer.incidentId));
   const assignedIncidentIds = new Set(state.incidents.filter((incident) => incident.assignedEmployeeId === employeeId).map((incident) => incident.id));
   const incidents = state.incidents
-    .filter((incident) => identity.role === 'supervisor' || visibleIncidentIds.has(incident.id) || assignedIncidentIds.has(incident.id))
-    .map((incident) => identity.role === 'supervisor' || assignedIncidentIds.has(incident.id) ? incident : { ...incident, information: [] });
+    .filter((incident) => visibleIncidentIds.has(incident.id) || assignedIncidentIds.has(incident.id))
+    .map((incident) => assignedIncidentIds.has(incident.id) ? incident : { ...incident, information: [] });
   return {
     ...state,
     accessScope: 'staff',
-    profile: identity.role === 'responder' && assignedIncidentIds.size > 0 ? state.profile : null,
+    profile: assignedIncidentIds.size > 0 ? state.profile : null,
     profileSecurity: null,
-    employees: identity.role === 'supervisor' ? state.employees.filter((employee) => employee.stationId === identity.stationId) : state.employees.filter((employee) => employee.id === employeeId),
-    attendance: identity.role === 'supervisor' ? state.attendance.filter((entry) => stationEmployeeIds.has(entry.employeeId)) : state.attendance.filter((entry) => entry.employeeId === employeeId),
+    employees: state.employees.filter((employee) => employee.id === employeeId),
+    attendance: state.attendance.filter((entry) => entry.employeeId === employeeId),
     incidents,
     offers: visibleOffers,
-    messages: identity.role === 'supervisor' ? state.messages.filter((message) => stationEmployeeIds.has(message.employeeId)) : state.messages.filter((message) => message.employeeId === employeeId),
-    audit: identity.role === 'supervisor' ? state.audit : [],
+    messages: state.messages.filter((message) => message.employeeId === employeeId),
+    audit: [],
     registrationStatus: state.profile ? 'REGISTERED' : 'NOT_REGISTERED',
   };
 }
@@ -152,4 +165,39 @@ export function serviceRequestHeaders(extra: HeadersInit = {}) {
 
 export function getSupabaseServerUrl() {
   return supabaseUrl;
+}
+
+export async function claimResponderAssignment(identity: StaffIdentity, sessionId: string, incidentId: string) {
+  if (!supabaseUrl || !serviceKey || identity.role !== 'responder' || !identity.employeeId) return false;
+  const response = await fetch(`${supabaseUrl}/rest/v1/rapidlink_responders?id=eq.${identity.employeeId}&active=eq.true&availability=eq.available&dispatch_status=eq.available`, {
+    method: 'PATCH',
+    headers: serviceHeaders({ 'content-type': 'application/json', prefer: 'return=representation' }),
+    body: JSON.stringify({ dispatch_status: 'responding', current_session_id: sessionId, current_incident_key: incidentId, updated_at: new Date().toISOString() }),
+  });
+  return response.ok && (await response.json() as unknown[]).length === 1;
+}
+
+export async function releaseResponderAssignment(employeeId: string, sessionId: string, incidentId: string) {
+  if (!supabaseUrl || !serviceKey) return;
+  await fetch(`${supabaseUrl}/rest/v1/rapidlink_responders?id=eq.${employeeId}&current_session_id=eq.${sessionId}&current_incident_key=eq.${encodeURIComponent(incidentId)}`, {
+    method: 'PATCH',
+    headers: serviceHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ dispatch_status: 'available', current_session_id: null, current_incident_key: null, updated_at: new Date().toISOString() }),
+  });
+}
+
+export async function persistResponderOperationalAction(identity: StaffIdentity, action: EmergencyAction) {
+  if (!supabaseUrl || !serviceKey || identity.role !== 'responder' || !identity.employeeId) return;
+  if (action.type === 'set-responder-availability') {
+    await fetch(`${supabaseUrl}/rest/v1/rapidlink_responders?id=eq.${identity.employeeId}`, {
+      method: 'PATCH', headers: serviceHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ availability: action.payload.availability, availability_reason: action.payload.reason?.trim() || null, availability_updated_at: new Date().toISOString(), updated_at: new Date().toISOString() }),
+    });
+  }
+  if (action.type === 'responder-heartbeat') {
+    await fetch(`${supabaseUrl}/rest/v1/rapidlink_responders?id=eq.${identity.employeeId}`, {
+      method: 'PATCH', headers: serviceHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ last_heartbeat_at: new Date().toISOString(), updated_at: new Date().toISOString() }),
+    });
+  }
 }

@@ -13,6 +13,9 @@ import pinHandler from '../api/sessions/[code]/pin.js';
 import staffActivationHandler from '../api/staff/activate.js';
 import staffBootstrapHandler from '../api/staff/bootstrap.js';
 import staffInvitationHandler from '../api/staff/invitations.js';
+import staffIdentityHandler from '../api/staff/me.js';
+import staffDirectoryHandler from '../api/staff/directory.js';
+import staffAttendanceHandler from '../api/staff/attendance.js';
 import type { ApiRequest, ApiResponse } from '../src/lib/vercel-api.js';
 
 type ApiHandler = (request: ApiRequest, response: ApiResponse) => Promise<unknown> | unknown;
@@ -80,6 +83,9 @@ function apiRoute(pathname: string): { handler: ApiHandler; query?: Record<strin
   if (pathname === '/api/staff/activate') return { handler: staffActivationHandler };
   if (pathname === '/api/staff/bootstrap') return { handler: staffBootstrapHandler };
   if (pathname === '/api/staff/invitations') return { handler: staffInvitationHandler };
+  if (pathname === '/api/staff/me') return { handler: staffIdentityHandler };
+  if (pathname === '/api/staff/directory') return { handler: staffDirectoryHandler };
+  if (pathname === '/api/staff/attendance') return { handler: staffAttendanceHandler };
 
   const match = pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(actions|attachments|cancel|pin))?$/);
   if (!match) return null;

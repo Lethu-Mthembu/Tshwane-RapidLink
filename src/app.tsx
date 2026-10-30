@@ -4,12 +4,11 @@ import { AppShell } from '@/components/app-shell';
 import { hasStaffRole, StaffAuthProvider, useStaffAuth } from '@/features/auth/staff-auth-context';
 import { EmergencyProvider } from '@/features/emergency/emergency-context';
 import { useEmergency } from '@/features/emergency/emergency-context';
-import { getActiveSessionCode } from '@/features/emergency/session-service';
 import type { StaffRole } from '@/features/emergency/types';
 import AttendancePage from '@/pages/attendance';
 import ClientPage from '@/pages/client';
 import ClientProfilePage from '@/pages/client-profile';
-import LauncherPage from '@/pages/launcher';
+import AdminPage from '@/pages/admin';
 import MessagesPage from '@/pages/messages';
 import OfflinePage from '@/pages/offline';
 import ResponderPage from '@/pages/responder';
@@ -37,8 +36,7 @@ function StaffOnly({ roles, children }: { roles: StaffRole[]; children: React.Re
   const { loading, identity } = useStaffAuth();
   if (loading) return <main className="min-h-[calc(100vh-4rem)] bg-white p-8 text-center font-bold text-[#003172]" role="status">Checking staff access…</main>;
   if (!hasStaffRole(identity, roles)) {
-    const code = getActiveSessionCode();
-    return <Navigate to={`/staff/sign-in${code ? `?session=${encodeURIComponent(code)}` : ''}`} replace />;
+    return <Navigate to="/staff/sign-in" replace />;
   }
   return children;
 }
@@ -50,7 +48,7 @@ export function App() {
         <AppShell>
           <Routes>
           <Route path="/" element={<Navigate to="/client" replace />} />
-          <Route path="/session" element={<LauncherPage />} />
+          <Route path="/session" element={<Navigate to="/client" replace />} />
           <Route path="/register" element={<RegistrationOnly />} />
           <Route path="/client" element={<ClientOnly><ClientPage /></ClientOnly>} />
           <Route path="/client/profile" element={<ClientOnly><ClientProfilePage /></ClientOnly>} />
@@ -58,9 +56,10 @@ export function App() {
           <Route path="/staff/sign-in" element={<StaffSignInPage />} />
           <Route path="/staff/activate" element={<StaffActivatePage />} />
           <Route path="/staff/bootstrap" element={<StaffBootstrapPage />} />
-          <Route path="/messages" element={<StaffOnly roles={['responder', 'supervisor']}><MessagesPage /></StaffOnly>} />
-          <Route path="/responder" element={<StaffOnly roles={['responder', 'supervisor']}><ResponderPage /></StaffOnly>} />
-          <Route path="/responder/offers/:offerId" element={<StaffOnly roles={['responder', 'supervisor']}><ResponderOfferPage /></StaffOnly>} />
+          <Route path="/admin" element={<StaffOnly roles={['admin']}><AdminPage /></StaffOnly>} />
+          <Route path="/messages" element={<StaffOnly roles={['responder']}><MessagesPage /></StaffOnly>} />
+          <Route path="/responder" element={<StaffOnly roles={['responder']}><ResponderPage /></StaffOnly>} />
+          <Route path="/responder/offers/:offerId" element={<StaffOnly roles={['responder']}><ResponderOfferPage /></StaffOnly>} />
           <Route path="/supervisor" element={<StaffOnly roles={['supervisor']}><SupervisorPage /></StaffOnly>} />
           <Route path="/supervisor/analytics" element={<StaffOnly roles={['supervisor']}><SupervisorAnalyticsPage /></StaffOnly>} />
           <Route path="/supervisor/employees" element={<Navigate to="/supervisor" replace />} />

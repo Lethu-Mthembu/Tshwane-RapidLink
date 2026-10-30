@@ -3,7 +3,7 @@
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 
 import { createInitialState } from './fixtures';
-import { flushPending, getActiveSessionCode, getSyncStatus, readState, receiveRemoteState, sessionService, syncFromRemote } from './session-service';
+import { createSession, flushPending, getActiveSessionCode, getSyncStatus, joinSession, readState, receiveRemoteState, sessionService, syncFromRemote } from './session-service';
 import type { EmergencyState, SyncStatus } from './types';
 import { subscribeToRoom } from '@/lib/supabase-browser';
 
@@ -27,12 +27,21 @@ export function EmergencyProvider({ children }: { children: ReactNode }) {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('saved');
 
   useEffect(() => {
-    const code = getActiveSessionCode();
-    setSessionCode(code);
-    setState(sessionService.recoverEscalations());
-    setOnline(navigator.onLine);
-    setSyncStatus(getSyncStatus());
-    setReady(true);
+    let code = getActiveSessionCode();
+    let disposed = false;
+    const bootstrap = async () => {
+      const routeChannel = new URLSearchParams(window.location.search).get('session');
+      const clientRoute = ['/client', '/register'].some((path) => window.location.pathname.startsWith(path));
+      if (routeChannel && routeChannel !== code) code = await joinSession(routeChannel).catch(() => code);
+      else if (!code && clientRoute) code = await createSession();
+      if (disposed) return;
+      setSessionCode(code);
+      setState(sessionService.recoverEscalations());
+      setOnline(navigator.onLine);
+      setSyncStatus(getSyncStatus());
+      setReady(true);
+      if (code && navigator.onLine) void sync();
+    };
     const unsubscribe = sessionService.subscribe((next) => {
       setState(next);
       setSessionCode(getActiveSessionCode());
@@ -53,8 +62,9 @@ export function EmergencyProvider({ children }: { children: ReactNode }) {
     window.addEventListener('focus', sync);
     const poll = window.setInterval(() => { if (navigator.onLine && getActiveSessionCode()) void sync(); }, 2500);
     const escalationCheck = window.setInterval(() => setState(sessionService.recoverEscalations()), 1000);
-    if (code && navigator.onLine) void sync();
+    void bootstrap();
     return () => {
+      disposed = true;
       unsubscribe();
       window.clearInterval(poll);
       window.clearInterval(escalationCheck);

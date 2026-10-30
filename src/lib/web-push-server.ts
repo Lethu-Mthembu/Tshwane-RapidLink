@@ -19,7 +19,7 @@ interface OutboxRow {
   attempts: number;
 }
 
-interface MemberRow { id: string; employee_key: string }
+interface ResponderRow { id: string; staff_account_id: string }
 interface SubscriptionRow { id: string; endpoint: string; p256dh: string; auth_secret: string; failure_count: number }
 
 export async function dispatchQueuedPushNotifications(sessionId: string, sessionCode: string) {
@@ -31,9 +31,9 @@ export async function dispatchQueuedPushNotifications(sessionId: string, session
   let submitted = 0; let failed = 0; let unregistered = 0;
   const results: Array<{ messageId: string; status: 'submitted' | 'failed' | 'no_subscription' }> = [];
   for (const message of queued) {
-    const memberResponse = await fetch(`${url}/rest/v1/rapidlink_staff_members?session_id=eq.${sessionId}&employee_key=eq.${encodeURIComponent(message.employee_key)}&active=eq.true&select=id,employee_key&limit=1`, { headers: serviceRequestHeaders(), cache: 'no-store' });
-    const member = memberResponse.ok ? (await memberResponse.json() as MemberRow[])[0] : null;
-    const subscriptionResponse = member ? await fetch(`${url}/rest/v1/rapidlink_push_subscriptions?staff_member_id=eq.${member.id}&disabled_at=is.null&select=id,endpoint,p256dh,auth_secret,failure_count`, { headers: serviceRequestHeaders(), cache: 'no-store' }) : null;
+    const responderResponse = await fetch(`${url}/rest/v1/rapidlink_responders?id=eq.${encodeURIComponent(message.employee_key)}&active=eq.true&select=id,staff_account_id&limit=1`, { headers: serviceRequestHeaders(), cache: 'no-store' });
+    const responder = responderResponse.ok ? (await responderResponse.json() as ResponderRow[])[0] : null;
+    const subscriptionResponse = responder ? await fetch(`${url}/rest/v1/rapidlink_push_subscriptions_v2?staff_account_id=eq.${responder.staff_account_id}&disabled_at=is.null&select=id,endpoint,p256dh,auth_secret,failure_count`, { headers: serviceRequestHeaders(), cache: 'no-store' }) : null;
     const subscriptions = subscriptionResponse?.ok ? await subscriptionResponse.json() as SubscriptionRow[] : [];
     if (!subscriptions.length) {
       unregistered += 1;
@@ -51,11 +51,11 @@ export async function dispatchQueuedPushNotifications(sessionId: string, session
           tag: message.offer_key,
         }), { TTL: 120, urgency: 'high' });
         deliveredToPushService = true;
-        await fetch(`${url}/rest/v1/rapidlink_push_subscriptions?id=eq.${subscription.id}`, { method: 'PATCH', headers: serviceRequestHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ failure_count: 0, last_seen_at: new Date().toISOString(), updated_at: new Date().toISOString() }) });
+        await fetch(`${url}/rest/v1/rapidlink_push_subscriptions_v2?id=eq.${subscription.id}`, { method: 'PATCH', headers: serviceRequestHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ failure_count: 0, last_seen_at: new Date().toISOString(), updated_at: new Date().toISOString() }) });
       } catch (error) {
         const statusCode = typeof error === 'object' && error && 'statusCode' in error ? Number(error.statusCode) : 0;
         const disabled = statusCode === 404 || statusCode === 410;
-        await fetch(`${url}/rest/v1/rapidlink_push_subscriptions?id=eq.${subscription.id}`, { method: 'PATCH', headers: serviceRequestHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ failure_count: subscription.failure_count + 1, updated_at: new Date().toISOString(), ...(disabled ? { disabled_at: new Date().toISOString() } : {}) }) });
+        await fetch(`${url}/rest/v1/rapidlink_push_subscriptions_v2?id=eq.${subscription.id}`, { method: 'PATCH', headers: serviceRequestHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ failure_count: subscription.failure_count + 1, updated_at: new Date().toISOString(), ...(disabled ? { disabled_at: new Date().toISOString() } : {}) }) });
       }
     }
     if (deliveredToPushService) { submitted += 1; results.push({ messageId: message.message_key, status: 'submitted' }); await updateOutbox(message, 'submitted'); }
